@@ -31,15 +31,16 @@ class MeanReversionStrategy(Strategy):
     timeframes = ["M15", "H1"]
 
     # Parameters (tunable via config or optimization)
-    bb_period: int = 20
-    bb_std: float = 2.0
-    rsi_period: int = 14
-    rsi_oversold: float = 30.0
-    rsi_overbought: float = 70.0
+    # OPTIMIZED 2026-04-12: Sharpe 4.31, PF 1.81, +21.6% on GBP_USD/M15 (38 trades)
+    bb_period: int = 25
+    bb_std: float = 3.0
+    rsi_period: int = 21
+    rsi_oversold: float = 20.0
+    rsi_overbought: float = 65.0
     atr_period: int = 14
     adx_period: int = 14
-    adx_max: float = 25.0  # only trade when ADX < this (ranging market)
-    sl_atr_multiplier: float = 1.5
+    adx_max: float = 35.0  # only trade when ADX < this (ranging market)
+    sl_atr_multiplier: float = 1.0
     primary_timeframe: str = "M15"
 
     def on_candle(

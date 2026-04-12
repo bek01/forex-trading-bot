@@ -15,11 +15,13 @@ StandardError=journal
 
 # Environment
 EnvironmentFile=/home/ubuntu/trading_bot/.env
+Environment=NUMBA_CACHE_DIR=/tmp/numba_cache
+Environment=PYTHONUNBUFFERED=1
 
 # Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/home/ubuntu/trading_bot/db /home/ubuntu/trading_bot/logs
+ReadWritePaths=/home/ubuntu/trading_bot/db /home/ubuntu/trading_bot/logs /tmp/numba_cache
 ProtectHome=read-only
 
 [Install]

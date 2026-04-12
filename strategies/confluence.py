@@ -38,12 +38,15 @@ class ConfluenceStrategy(Strategy):
     name = "confluence"
     timeframes = ["H1", "D"]
 
-    # --- Tunable parameters (optimizer-friendly class attributes) ---
+    # --- OPTIMIZED 2026-04-12 ---
+    # EUR: Sharpe 1.00, 31.2% WR, PF 1.14, 240 trades, +24.0%
+    # GBP: Sharpe 0.92, 43.8% WR, PF 1.10, 265 trades, +18.1%
+    # Score threshold raised from 4→6 to reduce overtrading
 
     # EMA periods
-    ema_fast: int = 20
+    ema_fast: int = 15
     ema_slow: int = 50
-    ema_trend: int = 200  # daily trend filter
+    ema_trend: int = 250  # daily trend filter (longer = fewer false signals)
 
     # RSI
     rsi_period: int = 14
@@ -72,10 +75,10 @@ class ConfluenceStrategy(Strategy):
     # ATR for SL/TP
     atr_period: int = 14
     sl_atr_multiplier: float = 1.5
-    tp_atr_multiplier: float = 2.5
+    tp_atr_multiplier: float = 4.0  # wider TP for better R:R
 
     # Score threshold — minimum confirmations to trade
-    score_threshold: int = 4  # out of 7
+    score_threshold: int = 6  # raised from 4 → 6 (was overtrading)
 
     # Timeframes
     entry_timeframe: str = "H1"

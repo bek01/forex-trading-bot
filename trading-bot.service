@@ -1,0 +1,26 @@
+[Unit]
+Description=Forex/Stock Trading Bot
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/trading_bot
+ExecStart=/home/ubuntu/venv/bin/python3 /home/ubuntu/trading_bot/main.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Environment
+EnvironmentFile=/home/ubuntu/trading_bot/.env
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/ubuntu/trading_bot/db /home/ubuntu/trading_bot/logs
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target

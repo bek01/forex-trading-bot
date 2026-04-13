@@ -204,12 +204,26 @@ FOREX_PAIRS = {
     "CHF_JPY": {"pip_size": 0.01, "pip_value_per_unit": 0.01, "min_units": 1, "avg_spread_pips": 2.0, "sessions": ["london"]},
 }
 
-# Session time windows (UTC)
+# ALL global trading sessions (UTC)
+# Forex is 24/5 — these overlap to create continuous coverage
 TRADING_SESSIONS = {
-    "tokyo":   {"start": 0, "end": 9},    # 00:00 - 09:00 UTC (Sydney overlap 00:00-03:00)
-    "london":  {"start": 7, "end": 16},   # 07:00 - 16:00 UTC
-    "newyork": {"start": 13, "end": 22},  # 13:00 - 22:00 UTC
+    "sydney":    {"start": 21, "end": 6},   # 21:00 - 06:00 UTC (crosses midnight)
+    "tokyo":     {"start": 0, "end": 9},    # 00:00 - 09:00 UTC
+    "shanghai":  {"start": 1, "end": 9},    # 01:00 - 09:00 UTC (overlaps Tokyo)
+    "singapore": {"start": 1, "end": 9},    # 01:00 - 09:00 UTC (overlaps Tokyo)
+    "mumbai":    {"start": 3, "end": 12},   # 03:30 - 11:30 UTC (bridges Asia→Europe)
+    "dubai":     {"start": 4, "end": 12},   # 04:00 - 12:00 UTC (bridges Asia→Europe)
+    "frankfurt": {"start": 7, "end": 16},   # 07:00 - 16:00 UTC (opens with London)
+    "london":    {"start": 7, "end": 16},   # 07:00 - 16:00 UTC (highest volume)
+    "newyork":   {"start": 13, "end": 22},  # 13:00 - 22:00 UTC
+    "chicago":   {"start": 14, "end": 22},  # 14:00 - 22:00 UTC (overlaps NY)
+    "toronto":   {"start": 13, "end": 22},  # 13:00 - 22:00 UTC (overlaps NY)
 }
+# Key overlaps (highest liquidity windows):
+#   Tokyo + Sydney:  21:00 - 06:00 UTC
+#   Tokyo + London:  07:00 - 09:00 UTC  (Asia → Europe handoff)
+#   London + NY:     13:00 - 16:00 UTC  (HIGHEST VOLUME WINDOW)
+#   NY close:        20:00 - 22:00 UTC  (thinnest liquidity)
 
 # Correlation matrix for risk management (approximate 2024-2026 values)
 PAIR_CORRELATIONS = {

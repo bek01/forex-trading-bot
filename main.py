@@ -29,6 +29,8 @@ from typing import Optional
 
 from config import get_config, AppConfig
 from data.candle_manager import CandleManager
+from data.trend_filter import GlobalTrendFilter
+from data.sentiment import SentimentData
 from db.database import Database
 from event_bus import Event, bus
 from execution.broker import OandaBroker
@@ -94,6 +96,8 @@ class TradingBot:
         self.executor: Optional[OrderExecutor] = None
         self.telegram: Optional[TelegramNotifier] = None
         self.telegram_poller: Optional[TelegramPoller] = None
+        self.trend_filter: Optional[GlobalTrendFilter] = None
+        self.sentiment: Optional[SentimentData] = None
 
         # Strategies
         self.strategies: list[Strategy] = []
@@ -119,6 +123,17 @@ class TradingBot:
         self.risk_manager = RiskManager(self.config.risk)
         self.executor = OrderExecutor(self.broker, self.config)
         self.telegram = TelegramNotifier(self.config.telegram)
+
+        # Trend filter + sentiment — prevents counter-trend trading
+        self.trend_filter = GlobalTrendFilter()
+        try:
+            self.sentiment = SentimentData(
+                self.config.broker.api_token,
+                self.config.broker.rest_url,
+            )
+        except Exception as e:
+            logger.warning(f"Sentiment data init failed: {e}")
+            self.sentiment = None
 
         # Load strategies
         self._load_strategies()
@@ -255,10 +270,37 @@ class TradingBot:
         self._shutdown()
 
     def _on_candle_close(self, data: dict):
-        """Feed new candle to all strategies."""
+        """Feed new candle to all strategies + update trend filter."""
         instrument = data["instrument"]
         timeframe = data["timeframe"]
 
+        # --- Update global trend filter on H4/D/H1 candle closes ---
+        if timeframe in ("H4", "D", "H1") and self.trend_filter:
+            try:
+                h4 = self.candle_manager.get_candles(instrument, "H4")
+                daily = self.candle_manager.get_candles(instrument, "D")
+                h1 = self.candle_manager.get_candles(instrument, "H1")
+                self.trend_filter.update_trend(instrument, h4, daily, h1)
+            except Exception as e:
+                logger.debug(f"Trend filter update error {instrument}: {e}")
+
+        # --- Update DXY + positioning periodically ---
+        if timeframe == "H1" and instrument == "EUR_USD" and self.sentiment:
+            try:
+                dxy = self.sentiment.get_dxy_trend()
+                self.trend_filter.update_dxy(dxy)
+            except Exception:
+                pass
+            try:
+                pos = self.sentiment.get_oanda_positioning(instrument)
+                if pos:
+                    self.trend_filter.update_retail_positioning(
+                        instrument, pos.get("pct_long", 50)
+                    )
+            except Exception:
+                pass
+
+        # --- Feed to strategies ---
         for strategy in self.strategies:
             if not strategy.enabled:
                 continue
@@ -279,11 +321,22 @@ class TradingBot:
                 )
 
     def _on_signal(self, signal: Signal):
-        """Process a trading signal through risk manager and executor."""
+        """Process a trading signal through trend filter → risk manager → executor."""
         logger.info(
             f"Signal received: {signal.side.value} {signal.instrument} "
             f"[{signal.strategy}] — {signal.reason}"
         )
+
+        # === TREND FILTER (prevents counter-trend trades) ===
+        if self.trend_filter:
+            allowed, reason = self.trend_filter.filter_signal(signal)
+            if not allowed:
+                logger.info(f"Trend filter: {reason}")
+                bus.emit(Event.RISK_BLOCKED, {
+                    "signal": signal,
+                    "reason": f"TREND_FILTER: {reason}",
+                })
+                return
 
         # Get current price for spread check
         try:

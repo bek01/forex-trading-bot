@@ -25,7 +25,7 @@ from strategies.base import Strategy, candles_to_df
 class LondonBreakoutStrategy(Strategy):
     name = "london_breakout"
     timeframes = ["M5"]
-    instruments = ["EUR_USD", "GBP_USD", "EUR_GBP"]
+    instruments = ["EUR_USD", "GBP_USD", "EUR_GBP", "EUR_CHF", "GBP_CHF", "EUR_JPY"]
 
     # Parameters
     range_start_hour: int = 7   # UTC

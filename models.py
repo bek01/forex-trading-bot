@@ -161,22 +161,75 @@ class AccountState:
         return ((self.peak_equity - self.equity) / self.peak_equity) * 100.0
 
 
-# Instrument metadata for forex pairs
+# Instrument metadata for forex pairs — 24/5 coverage across all sessions
 FOREX_PAIRS = {
-    "EUR_USD": {"pip_size": 0.0001, "pip_value_per_unit": 0.0001, "min_units": 1, "avg_spread_pips": 1.2},
-    "GBP_USD": {"pip_size": 0.0001, "pip_value_per_unit": 0.0001, "min_units": 1, "avg_spread_pips": 1.5},
-    "USD_JPY": {"pip_size": 0.01, "pip_value_per_unit": 0.01, "min_units": 1, "avg_spread_pips": 1.0},
-    "AUD_USD": {"pip_size": 0.0001, "pip_value_per_unit": 0.0001, "min_units": 1, "avg_spread_pips": 1.4},
-    "USD_CAD": {"pip_size": 0.0001, "pip_value_per_unit": 0.0001, "min_units": 1, "avg_spread_pips": 1.8},
-    "EUR_GBP": {"pip_size": 0.0001, "pip_value_per_unit": 0.0001, "min_units": 1, "avg_spread_pips": 1.3},
-    "USD_CHF": {"pip_size": 0.0001, "pip_value_per_unit": 0.0001, "min_units": 1, "avg_spread_pips": 1.6},
+    # === MAJORS (7) — tightest spreads, highest liquidity ===
+    "EUR_USD": {"pip_size": 0.0001, "pip_value_per_unit": 0.0001, "min_units": 1, "avg_spread_pips": 1.2, "sessions": ["london", "newyork"]},
+    "GBP_USD": {"pip_size": 0.0001, "pip_value_per_unit": 0.0001, "min_units": 1, "avg_spread_pips": 1.5, "sessions": ["london", "newyork"]},
+    "USD_JPY": {"pip_size": 0.01, "pip_value_per_unit": 0.01, "min_units": 1, "avg_spread_pips": 1.0, "sessions": ["tokyo", "newyork"]},
+    "USD_CHF": {"pip_size": 0.0001, "pip_value_per_unit": 0.0001, "min_units": 1, "avg_spread_pips": 1.6, "sessions": ["london", "newyork"]},
+    "AUD_USD": {"pip_size": 0.0001, "pip_value_per_unit": 0.0001, "min_units": 1, "avg_spread_pips": 1.4, "sessions": ["tokyo", "newyork"]},
+    "USD_CAD": {"pip_size": 0.0001, "pip_value_per_unit": 0.0001, "min_units": 1, "avg_spread_pips": 1.8, "sessions": ["newyork"]},
+    "NZD_USD": {"pip_size": 0.0001, "pip_value_per_unit": 0.0001, "min_units": 1, "avg_spread_pips": 2.0, "sessions": ["tokyo"]},
+
+    # === JPY CROSSES — best during Tokyo session ===
+    "EUR_JPY": {"pip_size": 0.01, "pip_value_per_unit": 0.01, "min_units": 1, "avg_spread_pips": 1.5, "sessions": ["tokyo", "london"]},
+    "GBP_JPY": {"pip_size": 0.01, "pip_value_per_unit": 0.01, "min_units": 1, "avg_spread_pips": 2.5, "sessions": ["tokyo", "london"]},
+    "AUD_JPY": {"pip_size": 0.01, "pip_value_per_unit": 0.01, "min_units": 1, "avg_spread_pips": 2.0, "sessions": ["tokyo"]},
+    "CAD_JPY": {"pip_size": 0.01, "pip_value_per_unit": 0.01, "min_units": 1, "avg_spread_pips": 2.2, "sessions": ["tokyo"]},
+    "NZD_JPY": {"pip_size": 0.01, "pip_value_per_unit": 0.01, "min_units": 1, "avg_spread_pips": 2.5, "sessions": ["tokyo"]},
+
+    # === EUR CROSSES — best during London session ===
+    "EUR_GBP": {"pip_size": 0.0001, "pip_value_per_unit": 0.0001, "min_units": 1, "avg_spread_pips": 1.3, "sessions": ["london"]},
+    "EUR_AUD": {"pip_size": 0.0001, "pip_value_per_unit": 0.0001, "min_units": 1, "avg_spread_pips": 2.0, "sessions": ["london"]},
+    "EUR_CAD": {"pip_size": 0.0001, "pip_value_per_unit": 0.0001, "min_units": 1, "avg_spread_pips": 2.2, "sessions": ["london"]},
+    "EUR_CHF": {"pip_size": 0.0001, "pip_value_per_unit": 0.0001, "min_units": 1, "avg_spread_pips": 1.8, "sessions": ["london"]},
+    "EUR_NZD": {"pip_size": 0.0001, "pip_value_per_unit": 0.0001, "min_units": 1, "avg_spread_pips": 3.0, "sessions": ["london"]},
+
+    # === GBP CROSSES — best during London session ===
+    "GBP_AUD": {"pip_size": 0.0001, "pip_value_per_unit": 0.0001, "min_units": 1, "avg_spread_pips": 3.0, "sessions": ["london"]},
+    "GBP_CAD": {"pip_size": 0.0001, "pip_value_per_unit": 0.0001, "min_units": 1, "avg_spread_pips": 3.5, "sessions": ["london"]},
+    "GBP_CHF": {"pip_size": 0.0001, "pip_value_per_unit": 0.0001, "min_units": 1, "avg_spread_pips": 3.0, "sessions": ["london"]},
+    "GBP_NZD": {"pip_size": 0.0001, "pip_value_per_unit": 0.0001, "min_units": 1, "avg_spread_pips": 4.0, "sessions": ["london"]},
+
+    # === AUD/NZD CROSSES — best during Tokyo/Sydney overlap ===
+    "AUD_NZD": {"pip_size": 0.0001, "pip_value_per_unit": 0.0001, "min_units": 1, "avg_spread_pips": 2.5, "sessions": ["tokyo"]},
+    "AUD_CAD": {"pip_size": 0.0001, "pip_value_per_unit": 0.0001, "min_units": 1, "avg_spread_pips": 2.5, "sessions": ["tokyo"]},
+    "AUD_CHF": {"pip_size": 0.0001, "pip_value_per_unit": 0.0001, "min_units": 1, "avg_spread_pips": 2.5, "sessions": ["tokyo"]},
+    "NZD_CAD": {"pip_size": 0.0001, "pip_value_per_unit": 0.0001, "min_units": 1, "avg_spread_pips": 3.0, "sessions": ["tokyo"]},
+    "NZD_CHF": {"pip_size": 0.0001, "pip_value_per_unit": 0.0001, "min_units": 1, "avg_spread_pips": 3.0, "sessions": ["tokyo"]},
+
+    # === CAD/CHF CROSSES ===
+    "CAD_CHF": {"pip_size": 0.0001, "pip_value_per_unit": 0.0001, "min_units": 1, "avg_spread_pips": 2.5, "sessions": ["newyork"]},
+    "CHF_JPY": {"pip_size": 0.01, "pip_value_per_unit": 0.01, "min_units": 1, "avg_spread_pips": 2.0, "sessions": ["london"]},
 }
 
-# Correlation matrix for risk management (approximate)
+# Session time windows (UTC)
+TRADING_SESSIONS = {
+    "tokyo":   {"start": 0, "end": 9},    # 00:00 - 09:00 UTC (Sydney overlap 00:00-03:00)
+    "london":  {"start": 7, "end": 16},   # 07:00 - 16:00 UTC
+    "newyork": {"start": 13, "end": 22},  # 13:00 - 22:00 UTC
+}
+
+# Correlation matrix for risk management (approximate 2024-2026 values)
 PAIR_CORRELATIONS = {
+    # Strong positive correlations (>0.7) — treat as near-duplicate exposure
     ("EUR_USD", "GBP_USD"): 0.87,
     ("EUR_USD", "AUD_USD"): 0.75,
-    ("EUR_USD", "USD_CHF"): -0.92,
+    ("EUR_USD", "NZD_USD"): 0.72,
     ("GBP_USD", "AUD_USD"): 0.70,
+    ("AUD_USD", "NZD_USD"): 0.92,    # very high — almost same trade
+    ("EUR_JPY", "GBP_JPY"): 0.85,
+    ("EUR_GBP", "EUR_CHF"): 0.72,
+    ("AUD_JPY", "NZD_JPY"): 0.88,
+
+    # Strong negative correlations — effectively opposite trades
+    ("EUR_USD", "USD_CHF"): -0.92,
+    ("GBP_USD", "USD_CHF"): -0.80,
+    ("AUD_USD", "USD_CAD"): -0.70,
+
+    # Moderate correlations (0.5-0.7)
     ("USD_JPY", "USD_CAD"): 0.55,
+    ("EUR_USD", "EUR_JPY"): 0.65,
+    ("GBP_USD", "GBP_JPY"): 0.60,
 }

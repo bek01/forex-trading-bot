@@ -52,16 +52,16 @@ class RiskConfig(BaseSettings):
         extra="ignore",
     )
 
-    # Per-trade risk
-    max_risk_per_trade_pct: float = 1.0        # Risk max 1% of equity per trade
-    max_risk_per_trade_usd: float = 100.0       # Hard cap in USD (well, GBP for this account)
+    # Per-trade risk — scaled for £100K demo
+    max_risk_per_trade_pct: float = 0.5         # Risk 0.5% per trade (£500 on 100K)
+    max_risk_per_trade_usd: float = 500.0       # Hard cap in GBP per trade
 
-    # Position limits
-    max_open_positions: int = 3
+    # Position limits — expanded for 24/5 multi-pair trading
+    max_open_positions: int = 10                # was 3 — now trading 23 pairs
     max_correlated_exposure: float = 1.5        # Correlated pairs count as 1.5x
 
     # Drawdown limits
-    daily_loss_limit_pct: float = 2.0           # Stop trading if daily loss > 2%
+    daily_loss_limit_pct: float = 3.0           # Stop trading if daily loss > 3% (£3K on 100K)
     max_drawdown_warning_pct: float = 5.0       # Alert at 5% drawdown from peak
     max_drawdown_critical_pct: float = 8.0      # Reduce size at 8%
     max_drawdown_halt_pct: float = 10.0         # Kill switch at 10% from peak
@@ -89,11 +89,21 @@ class StrategyConfig(BaseSettings):
         extra="ignore",
     )
 
-    # Instruments to trade
+    # Instruments to trade — 24/5 across Tokyo, London, New York
     instruments: list[str] = [
-        "EUR_USD",
-        "GBP_USD",
-        "USD_JPY",
+        # Majors (7) — always active, tightest spreads
+        "EUR_USD", "GBP_USD", "USD_JPY", "USD_CHF",
+        "AUD_USD", "USD_CAD", "NZD_USD",
+        # JPY crosses — Tokyo session stars
+        "EUR_JPY", "GBP_JPY", "AUD_JPY", "CAD_JPY",
+        # EUR crosses — London session
+        "EUR_GBP", "EUR_AUD", "EUR_CAD", "EUR_CHF",
+        # GBP crosses — London session
+        "GBP_AUD", "GBP_CHF", "GBP_CAD",
+        # AUD/NZD crosses — Tokyo/Sydney
+        "AUD_NZD", "AUD_CAD",
+        # Other
+        "CHF_JPY", "NZD_JPY", "CAD_CHF",
     ]
 
     # Timeframes to watch
@@ -108,7 +118,7 @@ class StrategyConfig(BaseSettings):
     stat_arb_enabled: bool = True
 
     # Candle buffer size (how many candles to keep in memory per instrument/timeframe)
-    candle_buffer_size: int = 500
+    candle_buffer_size: int = 300  # reduced from 500 — more pairs, less depth needed
 
 
 class TelegramConfig(BaseSettings):

@@ -36,7 +36,7 @@ from strategies.base import Strategy, candles_to_df
 class SessionMomentumStrategy(Strategy):
     name = "session_momentum"
     timeframes = ["M15"]
-    instruments = ["EUR_USD", "GBP_USD"]
+    instruments = ["EUR_USD", "GBP_USD", "EUR_JPY", "GBP_JPY", "EUR_GBP", "USD_CHF"]
 
     # --- Tunable parameters ---
 

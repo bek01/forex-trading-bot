@@ -150,10 +150,18 @@ class GlobalTrendFilter:
         td = self._trends.get(instrument)
 
         if not td or not td.updated_at:
-            # No trend data yet — allow (don't block during startup)
-            return True, "no trend data yet"
+            # No trend data — BLOCK. "When in doubt, stay out."
+            return False, f"BLOCKED: no trend data for {instrument} — waiting for H4/D candles"
 
         consensus = td.consensus
+
+        # === RULE 0: Block when trend is unknown (H4 or D is FLAT/conflicting) ===
+        if consensus == "FLAT":
+            # H4 and D disagree or both unknown — no directional confidence
+            return False, (
+                f"BLOCKED: no clear trend for {instrument} "
+                f"(H4={td.h4_trend}, D={td.daily_trend}) — waiting for alignment"
+            )
 
         # === RULE 1: Block counter-trend trades ===
         if consensus == "UP" and signal.side == Side.SELL:

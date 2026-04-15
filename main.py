@@ -39,6 +39,7 @@ from execution.order_executor import OrderExecutor
 from models import AccountState, Position, Signal, Tick
 from monitoring.telegram_bot import TelegramNotifier, TelegramPoller
 from risk.risk_manager import RiskManager
+from risk.pair_guard import PairGuard
 from strategies.base import Strategy
 from strategies.mean_reversion import MeanReversionStrategy
 from strategies.trend_following import TrendFollowingStrategy
@@ -100,6 +101,7 @@ class TradingBot:
         self.trend_filter: Optional[GlobalTrendFilter] = None
         self.sentiment: Optional[SentimentData] = None
         self.trailing_stop: Optional[ProfitManager] = None
+        self.pair_guard: Optional[PairGuard] = None
 
         # Strategies
         self.strategies: list[Strategy] = []
@@ -149,6 +151,15 @@ class TradingBot:
             trail_distance_pips=10.0,  # trail 10 pips behind after stage 2
             trail_tight_pips=7.0,      # tighter 7 pip trail after stage 3
             min_trail_step_pips=3.0,
+        )
+
+        # Pair guard — auto-blocks consistently losing pairs
+        self.pair_guard = PairGuard(
+            state_file=self.config.db_path.replace("trades", "pair_guard").replace(".db", ".json"),
+            consecutive_losses_to_block=3,  # block after 3 losses in a row
+            initial_block_days=7,           # first block: 7 days
+            max_block_days=90,              # max block: 90 days
+            backoff_multiplier=2.0,         # double each time: 7→14→28→56→90
         )
 
         # Load strategies
@@ -341,11 +352,18 @@ class TradingBot:
                 )
 
     def _on_signal(self, signal: Signal):
-        """Process a trading signal through trend filter → risk manager → executor."""
+        """Process signal through: pair guard → trend filter → risk manager → executor."""
         logger.info(
             f"Signal received: {signal.side.value} {signal.instrument} "
             f"[{signal.strategy}] — {signal.reason}"
         )
+
+        # === PAIR GUARD (blocks consistently losing pairs) ===
+        if self.pair_guard:
+            blocked, reason = self.pair_guard.is_blocked(signal.instrument)
+            if blocked:
+                logger.info(f"Pair guard: {reason}")
+                return
 
         # === TREND FILTER (prevents counter-trend trades) ===
         if self.trend_filter:
@@ -400,7 +418,14 @@ class TradingBot:
         )
 
     def _on_position_closed(self, data: dict):
-        """Log closed position and notify."""
+        """Log closed position, notify, and record in pair guard."""
+        # Record result in pair guard for auto-block tracking
+        if self.pair_guard:
+            instrument = data.get("instrument", "")
+            pnl = data.get("realized_pnl", 0)
+            if instrument and pnl != 0:
+                self.pair_guard.record_trade(instrument, pnl)
+
         self.telegram.notify_trade_closed(
             data.get("instrument", ""),
             data.get("side", ""),

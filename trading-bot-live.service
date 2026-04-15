@@ -1,0 +1,28 @@
+[Unit]
+Description=Forex Trading Bot — LIVE (Real Money)
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/trading_bot
+ExecStart=/home/ubuntu/venv/bin/python3 /home/ubuntu/trading_bot/main.py
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+# LIVE account environment
+EnvironmentFile=/home/ubuntu/trading_bot/.env.live
+Environment=NUMBA_CACHE_DIR=/tmp/numba_cache
+Environment=PYTHONUNBUFFERED=1
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/ubuntu/trading_bot/db /home/ubuntu/trading_bot/logs /tmp/numba_cache
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target

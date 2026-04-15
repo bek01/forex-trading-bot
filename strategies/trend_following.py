@@ -41,8 +41,8 @@ class TrendFollowingStrategy(Strategy):
     adx_period: int = 14
     adx_min: float = 30.0  # only trade when ADX > this (strong trends only)
     atr_period: int = 14
-    sl_atr_multiplier: float = 2.0
-    tp_atr_multiplier: float = 4.0
+    sl_atr_multiplier: float = 1.5
+    tp_atr_multiplier: float = 2.5  # tightened from 4.0 — trailing stop handles runners
     entry_timeframe: str = "H1"
     trend_timeframe: str = "D"
 

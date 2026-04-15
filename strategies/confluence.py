@@ -75,7 +75,7 @@ class ConfluenceStrategy(Strategy):
     # ATR for SL/TP
     atr_period: int = 14
     sl_atr_multiplier: float = 1.5
-    tp_atr_multiplier: float = 4.0  # wider TP for better R:R
+    tp_atr_multiplier: float = 2.5  # tightened from 4.0 — trailing stop handles runners
 
     # Score threshold — minimum confirmations to trade
     score_threshold: int = 6  # raised from 4 → 6 (was overtrading)

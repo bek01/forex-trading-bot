@@ -33,6 +33,7 @@ from data.trend_filter import GlobalTrendFilter
 from data.sentiment import SentimentData
 from db.database import Database
 from event_bus import Event, bus
+from execution.trailing_stop import TrailingStopManager
 from execution.broker import OandaBroker
 from execution.order_executor import OrderExecutor
 from models import AccountState, Position, Signal, Tick
@@ -98,6 +99,7 @@ class TradingBot:
         self.telegram_poller: Optional[TelegramPoller] = None
         self.trend_filter: Optional[GlobalTrendFilter] = None
         self.sentiment: Optional[SentimentData] = None
+        self.trailing_stop: Optional[TrailingStopManager] = None
 
         # Strategies
         self.strategies: list[Strategy] = []
@@ -134,6 +136,15 @@ class TradingBot:
         except Exception as e:
             logger.warning(f"Sentiment data init failed: {e}")
             self.sentiment = None
+
+        # Trailing stop manager — auto-protects profits
+        self.trailing_stop = TrailingStopManager(
+            broker=self.broker,
+            breakeven_trigger_pips=10.0,  # move SL to breakeven after +10 pips
+            trail_trigger_pips=20.0,      # start trailing after +20 pips
+            trail_distance_pips=12.0,     # trail 12 pips behind price
+            min_trail_step_pips=3.0,      # minimum move before updating SL
+        )
 
         # Load strategies
         self._load_strategies()
@@ -236,6 +247,10 @@ class TradingBot:
 
                 # --- Poll candles for new data ---
                 self.candle_manager.poll()
+
+                # --- Trailing stop management (every 15s) ---
+                if self.trailing_stop:
+                    self.trailing_stop.check_and_update(check_interval_sec=15.0)
 
                 # --- Sync account state ---
                 if now - self._last_account_sync >= self.config.account_sync_interval_sec:

@@ -33,7 +33,7 @@ from data.trend_filter import GlobalTrendFilter
 from data.sentiment import SentimentData
 from db.database import Database
 from event_bus import Event, bus
-from execution.trailing_stop import TrailingStopManager
+from execution.trailing_stop import ProfitManager
 from execution.broker import OandaBroker
 from execution.order_executor import OrderExecutor
 from models import AccountState, Position, Signal, Tick
@@ -99,7 +99,7 @@ class TradingBot:
         self.telegram_poller: Optional[TelegramPoller] = None
         self.trend_filter: Optional[GlobalTrendFilter] = None
         self.sentiment: Optional[SentimentData] = None
-        self.trailing_stop: Optional[TrailingStopManager] = None
+        self.trailing_stop: Optional[ProfitManager] = None
 
         # Strategies
         self.strategies: list[Strategy] = []
@@ -137,13 +137,18 @@ class TradingBot:
             logger.warning(f"Sentiment data init failed: {e}")
             self.sentiment = None
 
-        # Trailing stop manager — auto-protects profits
-        self.trailing_stop = TrailingStopManager(
+        # Profit manager — partial profit scaling + trailing stops
+        self.trailing_stop = ProfitManager(
             broker=self.broker,
-            breakeven_trigger_pips=10.0,  # move SL to breakeven after +10 pips
-            trail_trigger_pips=20.0,      # start trailing after +20 pips
-            trail_distance_pips=12.0,     # trail 12 pips behind price
-            min_trail_step_pips=3.0,      # minimum move before updating SL
+            stage1_pips=10.0,        # +10 pips → close 25%, SL to breakeven
+            stage2_pips=20.0,        # +20 pips → close 25% more, start trailing
+            stage3_pips=30.0,        # +30 pips → close 25% more, tighten trail
+            stage1_close_pct=0.25,   # close 25% at each stage
+            stage2_close_pct=0.25,
+            stage3_close_pct=0.25,
+            trail_distance_pips=10.0,  # trail 10 pips behind after stage 2
+            trail_tight_pips=7.0,      # tighter 7 pip trail after stage 3
+            min_trail_step_pips=3.0,
         )
 
         # Load strategies
@@ -248,9 +253,9 @@ class TradingBot:
                 # --- Poll candles for new data ---
                 self.candle_manager.poll()
 
-                # --- Trailing stop management (every 15s) ---
+                # --- Profit manager: partial closes + trailing stops (every 10s) ---
                 if self.trailing_stop:
-                    self.trailing_stop.check_and_update(check_interval_sec=15.0)
+                    self.trailing_stop.check_and_update(check_interval_sec=10.0)
 
                 # --- Sync account state ---
                 if now - self._last_account_sync >= self.config.account_sync_interval_sec:

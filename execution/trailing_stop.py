@@ -1,27 +1,26 @@
-"""Trailing Stop Manager — automatically protects profits on open trades.
+"""Profit Manager — partial profit scaling + trailing stops.
 
-This replaces the need for manual closes. It monitors all open trades
-and progressively moves the stop loss as the trade moves in your favor.
+Replaces manual closes with automated 4-stage profit taking:
 
-How it works:
-1. Trade opens with original SL (e.g., -15 pips)
-2. Price moves +10 pips → SL moved to breakeven (entry price)
-3. Price moves +20 pips → SL trails at +10 pips behind
-4. Price hits TP → full target closed automatically
-5. Price reverses → trailing SL catches it with locked profit
+  STAGE 1: +10 pips → Close 25% of position + SL to breakeven
+  STAGE 2: +20 pips → Close 25% more + start trailing SL
+  STAGE 3: +30 pips → Close 25% more + tighten trail
+  STAGE 4: Let final 25% run with tight trailing stop
 
-Settings (all in pips, configurable):
-- breakeven_trigger: Move SL to breakeven after this many pips profit (default: 10)
-- trail_trigger: Start trailing after this many pips profit (default: 20)
-- trail_distance: How far behind price the SL trails (default: 12 pips)
-- min_trail_step: Minimum pip movement before updating SL (default: 3 pips)
+This captures profit incrementally instead of all-or-nothing TP.
+Our data shows TPs only hit 39% of the time — partial scaling
+captures profit on the other 61% of trades.
+
+Also manages:
+- Breakeven SL moves
+- Trailing stop progression
+- Minimum position size checks (OANDA requires >= 1 unit)
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timezone
 from typing import Optional
 
 from execution.broker import OandaBroker
@@ -29,33 +28,53 @@ from execution.broker import OandaBroker
 logger = logging.getLogger(__name__)
 
 
-class TrailingStopManager:
-    """Monitors open trades and manages trailing stops via OANDA API."""
+class ProfitManager:
+    """Manages partial profit taking + trailing stops on open trades."""
 
     def __init__(
         self,
         broker: OandaBroker,
-        breakeven_trigger_pips: float = 10.0,
-        trail_trigger_pips: float = 20.0,
-        trail_distance_pips: float = 12.0,
+        # Partial close stages (in pips of profit)
+        stage1_pips: float = 10.0,   # close 25%, SL to breakeven
+        stage2_pips: float = 20.0,   # close 25% more, start trailing
+        stage3_pips: float = 30.0,   # close 25% more, tighten trail
+        # Partial close percentages (must sum to < 1.0, remainder runs)
+        stage1_close_pct: float = 0.25,
+        stage2_close_pct: float = 0.25,
+        stage3_close_pct: float = 0.25,
+        # Trailing stop settings
+        trail_distance_pips: float = 10.0,
+        trail_tight_pips: float = 7.0,   # tighter trail after stage 3
         min_trail_step_pips: float = 3.0,
     ):
         self.broker = broker
-        self.breakeven_trigger = breakeven_trigger_pips
-        self.trail_trigger = trail_trigger_pips
+
+        # Stage thresholds
+        self.stage1_pips = stage1_pips
+        self.stage2_pips = stage2_pips
+        self.stage3_pips = stage3_pips
+        self.stage1_pct = stage1_close_pct
+        self.stage2_pct = stage2_close_pct
+        self.stage3_pct = stage3_close_pct
+
+        # Trail settings
         self.trail_distance = trail_distance_pips
+        self.trail_tight = trail_tight_pips
         self.min_trail_step = min_trail_step_pips
 
-        # Track which trades we've already moved to breakeven
-        self._breakeven_set: set[str] = set()  # trade IDs at breakeven
-        self._last_sl: dict[str, float] = {}   # trade_id → last SL price we set
+        # State tracking per trade
+        self._trade_state: dict[str, dict] = {}
+        # Each trade_id -> {
+        #   "initial_units": int,
+        #   "stage": 0-4,
+        #   "last_sl": float,
+        # }
         self._last_check = 0.0
+        self._price_cache: dict[str, tuple] = {}  # instrument -> (bid, ask, timestamp)
+        self._price_cache_ttl = 5.0  # seconds
 
-    def check_and_update(self, check_interval_sec: float = 15.0):
-        """
-        Check all open trades and update trailing stops.
-        Call this from the main loop. Throttled by check_interval_sec.
-        """
+    def check_and_update(self, check_interval_sec: float = 10.0):
+        """Check all open trades. Call from main loop."""
         now = time.time()
         if now - self._last_check < check_interval_sec:
             return
@@ -64,134 +83,211 @@ class TrailingStopManager:
         try:
             self._update_all_trades()
         except Exception as e:
-            logger.error(f"Trailing stop check failed: {e}")
+            logger.error(f"Profit manager check failed: {e}")
 
     def _update_all_trades(self):
-        """Fetch open trades from broker and update SLs."""
-        resp = self.broker._get(
-            f"/v3/accounts/{self.broker.account_id}/openTrades"
-        )
+        """Fetch open trades and process each one."""
+        try:
+            resp = self.broker._get(
+                f"/v3/accounts/{self.broker.account_id}/openTrades"
+            )
+        except Exception as e:
+            logger.debug(f"Failed to fetch open trades: {e}")
+            return
+
         trades = resp.get("trades", [])
+        active_ids = set()
 
         for trade in trades:
             try:
+                trade_id = trade["id"]
+                active_ids.add(trade_id)
                 self._process_trade(trade)
             except Exception as e:
-                logger.debug(f"Trail update error for trade {trade.get('id')}: {e}")
+                logger.debug(f"Profit manager error trade {trade.get('id')}: {e}")
+
+        # Clean up closed trades
+        closed = [tid for tid in self._trade_state if tid not in active_ids]
+        for tid in closed:
+            del self._trade_state[tid]
+
+    def _get_price(self, instrument: str) -> tuple[float, float]:
+        """Get bid/ask with short cache to avoid API spam."""
+        now = time.time()
+        cached = self._price_cache.get(instrument)
+        if cached and (now - cached[2]) < self._price_cache_ttl:
+            return cached[0], cached[1]
+
+        tick = self.broker.get_price(instrument)
+        self._price_cache[instrument] = (tick.bid, tick.ask, now)
+        return tick.bid, tick.ask
 
     def _process_trade(self, trade: dict):
-        """Process a single open trade for trailing stop logic."""
+        """Process a single open trade for partial profit + trailing."""
         trade_id = trade["id"]
         instrument = trade["instrument"]
-        units = int(trade["currentUnits"])
-        is_buy = units > 0
+        current_units = int(trade["currentUnits"])
+        is_buy = current_units > 0
         entry_price = float(trade["price"])
-        current_price = float(trade.get("unrealizedPL", 0))  # not useful directly
+        abs_units = abs(current_units)
+
+        # Get or create state
+        if trade_id not in self._trade_state:
+            self._trade_state[trade_id] = {
+                "initial_units": abs_units,
+                "stage": 0,
+                "last_sl": 0.0,
+            }
+
+        state = self._trade_state[trade_id]
 
         # Get current SL
         sl_order = trade.get("stopLossOrder")
         if not sl_order:
-            return  # no SL set — shouldn't happen but skip
-
+            return
         current_sl = float(sl_order["price"])
 
-        # Determine pip size
+        # Pip size
         pip_size = 0.01 if "JPY" in instrument else 0.0001
 
-        # Get current market price
-        # We use the trade's currentUnits and unrealizedPL to infer current price
-        # But more reliable: use the pricing endpoint
+        # Get market price
         try:
-            tick = self.broker.get_price(instrument)
+            bid, ask = self._get_price(instrument)
         except Exception:
             return
 
         if is_buy:
-            current_market = tick.bid  # exit price for longs
-            profit_pips = (current_market - entry_price) / pip_size
+            market_price = bid  # exit price for longs
+            profit_pips = (market_price - entry_price) / pip_size
         else:
-            current_market = tick.ask  # exit price for shorts
-            profit_pips = (entry_price - current_market) / pip_size
+            market_price = ask  # exit price for shorts
+            profit_pips = (entry_price - market_price) / pip_size
 
-        # === STAGE 1: Move to breakeven ===
-        if (profit_pips >= self.breakeven_trigger and
-                trade_id not in self._breakeven_set):
-            # Move SL to entry price (breakeven)
-            new_sl = entry_price
-            if is_buy and new_sl > current_sl:
-                if self._update_sl(trade_id, new_sl, instrument):
-                    self._breakeven_set.add(trade_id)
-                    logger.info(
-                        f"BREAKEVEN: {instrument} trade {trade_id} — "
-                        f"SL moved to {new_sl:.5f} (+{profit_pips:.0f} pips profit)"
-                    )
-            elif not is_buy and new_sl < current_sl:
-                if self._update_sl(trade_id, new_sl, instrument):
-                    self._breakeven_set.add(trade_id)
-                    logger.info(
-                        f"BREAKEVEN: {instrument} trade {trade_id} — "
-                        f"SL moved to {new_sl:.5f} (+{profit_pips:.0f} pips profit)"
-                    )
+        # Skip if not in profit
+        if profit_pips < self.stage1_pips and state["stage"] == 0:
+            return
 
-        # === STAGE 2: Trail the stop ===
-        if profit_pips >= self.trail_trigger:
+        initial_units = state["initial_units"]
+
+        # === STAGE 1: +10 pips → close 25%, SL to breakeven ===
+        if profit_pips >= self.stage1_pips and state["stage"] < 1:
+            close_units = int(initial_units * self.stage1_pct)
+            if close_units >= 1 and abs_units > close_units:
+                if self._partial_close(trade_id, close_units, instrument, is_buy):
+                    logger.info(
+                        f"PARTIAL 1/4: {instrument} trade {trade_id} — "
+                        f"closed {close_units} units at +{profit_pips:.0f} pips"
+                    )
+                # Move SL to breakeven regardless
+                self._update_sl(trade_id, entry_price, instrument)
+                logger.info(
+                    f"BREAKEVEN: {instrument} trade {trade_id} — "
+                    f"SL → {entry_price:.5f}"
+                )
+            elif close_units < 1:
+                # Position too small to split — just move SL to breakeven
+                self._update_sl(trade_id, entry_price, instrument)
+                logger.info(
+                    f"BREAKEVEN (no partial — units too small): {instrument} "
+                    f"trade {trade_id}"
+                )
+            state["stage"] = 1
+
+        # === STAGE 2: +20 pips → close 25% more, start trailing ===
+        if profit_pips >= self.stage2_pips and state["stage"] < 2:
+            # Recalculate remaining units
+            remaining = abs_units - int(initial_units * self.stage1_pct)
+            close_units = int(initial_units * self.stage2_pct)
+            if close_units >= 1 and abs_units > close_units:
+                if self._partial_close(trade_id, close_units, instrument, is_buy):
+                    logger.info(
+                        f"PARTIAL 2/4: {instrument} trade {trade_id} — "
+                        f"closed {close_units} units at +{profit_pips:.0f} pips"
+                    )
+            state["stage"] = 2
+
+        # === STAGE 3: +30 pips → close 25% more, tighten trail ===
+        if profit_pips >= self.stage3_pips and state["stage"] < 3:
+            close_units = int(initial_units * self.stage3_pct)
+            if close_units >= 1 and abs_units > close_units:
+                if self._partial_close(trade_id, close_units, instrument, is_buy):
+                    logger.info(
+                        f"PARTIAL 3/4: {instrument} trade {trade_id} — "
+                        f"closed {close_units} units at +{profit_pips:.0f} pips"
+                    )
+            state["stage"] = 3
+
+        # === TRAILING STOP (active after stage 1) ===
+        if state["stage"] >= 1 and profit_pips >= self.stage1_pips:
+            # Use tighter trail after stage 3
+            trail = self.trail_tight if state["stage"] >= 3 else self.trail_distance
+
             if is_buy:
-                new_sl = current_market - (self.trail_distance * pip_size)
-                # Only move SL up, never down
+                new_sl = market_price - (trail * pip_size)
                 if new_sl <= current_sl:
-                    return
+                    return  # only move up
             else:
-                new_sl = current_market + (self.trail_distance * pip_size)
-                # Only move SL down, never up
+                new_sl = market_price + (trail * pip_size)
                 if new_sl >= current_sl:
-                    return
+                    return  # only move down
 
-            # Check minimum step
-            sl_move_pips = abs(new_sl - current_sl) / pip_size
-            if sl_move_pips < self.min_trail_step:
+            # Minimum step check
+            sl_move = abs(new_sl - current_sl) / pip_size
+            if sl_move < self.min_trail_step:
                 return
 
-            new_sl = round(new_sl, 5 if pip_size == 0.0001 else 3)
+            new_sl = round(new_sl, 3 if "JPY" in instrument else 5)
 
             if self._update_sl(trade_id, new_sl, instrument):
-                locked_pips = abs(new_sl - entry_price) / pip_size
+                locked = abs(new_sl - entry_price) / pip_size
                 logger.info(
                     f"TRAILING: {instrument} trade {trade_id} — "
-                    f"SL → {new_sl:.5f} (profit locked: +{locked_pips:.0f} pips, "
-                    f"current: +{profit_pips:.0f} pips)"
+                    f"SL → {new_sl} (locked: +{locked:.0f} pips, "
+                    f"current: +{profit_pips:.0f} pips, "
+                    f"stage: {state['stage']}/4, trail: {trail} pips)"
                 )
 
-    def _update_sl(self, trade_id: str, new_sl: float, instrument: str) -> bool:
-        """Update the stop loss on a trade via OANDA API."""
+    def _partial_close(self, trade_id: str, units: int, instrument: str, is_buy: bool) -> bool:
+        """Close a portion of a trade."""
         try:
-            # Determine decimal places
-            decimals = 3 if "JPY" in instrument else 5
-            sl_str = f"{new_sl:.{decimals}f}"
+            # OANDA close uses positive units always — the side is implicit from the trade
+            self.broker._put(
+                f"/v3/accounts/{self.broker.account_id}/trades/{trade_id}/close",
+                json={"units": str(units)},
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Partial close failed trade {trade_id}: {e}")
+            return False
 
+    def _update_sl(self, trade_id: str, new_sl: float, instrument: str) -> bool:
+        """Update stop loss on a trade."""
+        try:
+            decimals = 3 if "JPY" in instrument else 5
             self.broker._put(
                 f"/v3/accounts/{self.broker.account_id}/trades/{trade_id}/orders",
                 json={
                     "stopLoss": {
-                        "price": sl_str,
+                        "price": f"{new_sl:.{decimals}f}",
                         "timeInForce": "GTC",
                     }
                 },
             )
-            self._last_sl[trade_id] = new_sl
             return True
         except Exception as e:
-            logger.error(f"Failed to update SL on trade {trade_id}: {e}")
+            logger.error(f"SL update failed trade {trade_id}: {e}")
             return False
 
-    def on_trade_closed(self, trade_id: str):
-        """Clean up state when a trade closes."""
-        self._breakeven_set.discard(trade_id)
-        self._last_sl.pop(trade_id, None)
-
     def get_status(self) -> dict:
-        """Return current trailing stop state."""
+        """Current state for monitoring."""
+        stages = {0: 0, 1: 0, 2: 0, 3: 0}
+        for state in self._trade_state.values():
+            s = state["stage"]
+            stages[s] = stages.get(s, 0) + 1
         return {
-            "trades_at_breakeven": len(self._breakeven_set),
-            "trades_trailing": len(self._last_sl),
-            "breakeven_ids": list(self._breakeven_set),
+            "tracked_trades": len(self._trade_state),
+            "stage_0_waiting": stages[0],
+            "stage_1_breakeven": stages[1],
+            "stage_2_trailing": stages[2],
+            "stage_3_tight_trail": stages[3],
         }

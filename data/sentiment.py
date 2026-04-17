@@ -240,14 +240,70 @@ class SentimentData:
             return None
 
     # ------------------------------------------------------------------
+    # USD basket trend — fallback using OANDA H1 candles when Yahoo DXY
+    # returns FLAT / fails. Cheap + always available since candles are
+    # already loaded by the bot.
+    # ------------------------------------------------------------------
+
+    def get_usd_basket_trend(self, h1_closes: dict[str, list[float]]) -> str:
+        """Compute USD direction from OANDA H1 closes of major pairs.
+
+        Args:
+            h1_closes: {instrument: [close1, close2, ...]} — needs EUR_USD,
+                GBP_USD, USD_JPY, USD_CHF, AUD_USD (any 3+ is OK).
+
+        Each pair's last 4h vs prior 4h mid-close movement is converted to
+        "USD gain %" and averaged. Threshold ±0.10% aggregate → UP/DOWN.
+
+        Returns "UP", "DOWN", or "FLAT".
+        """
+        # Sign convention: multiply pair_pct by sign to get USD strength.
+        #   USD-quote pair (EUR_USD, GBP_USD…): pair UP ⇒ USD DOWN ⇒ sign=-1
+        #   USD-base pair (USD_JPY, USD_CHF…):  pair UP ⇒ USD UP   ⇒ sign=+1
+        weights = {
+            "EUR_USD": -1.0,
+            "GBP_USD": -1.0,
+            "AUD_USD": -1.0,
+            "NZD_USD": -1.0,
+            "USD_JPY": +1.0,
+            "USD_CHF": +1.0,
+            "USD_CAD": +1.0,
+        }
+        usd_moves = []
+        for ins, sign in weights.items():
+            closes = h1_closes.get(ins) or []
+            if len(closes) < 8:
+                continue
+            recent = sum(closes[-4:]) / 4
+            earlier = sum(closes[-8:-4]) / 4
+            if earlier <= 0:
+                continue
+            pair_pct = (recent - earlier) / earlier * 100
+            usd_moves.append(sign * pair_pct)
+
+        if len(usd_moves) < 3:
+            return "FLAT"
+        avg = sum(usd_moves) / len(usd_moves)
+        if avg > 0.10:
+            return "UP"
+        if avg < -0.10:
+            return "DOWN"
+        return "FLAT"
+
+    # ------------------------------------------------------------------
     # DXY (US Dollar Index) trend
     # ------------------------------------------------------------------
 
     def get_dxy_trend(self) -> str:
         """Get current DXY trend from Yahoo Finance 15m intraday data.
 
-        Returns:
-            "UP", "DOWN", or "FLAT".
+        Tightened 2026-04-16:
+          - Threshold ±0.05% → ±0.02% (was too loose — DXY rarely moves
+            that much in 1h, so it returned FLAT and didn't filter).
+          - Compare last 8 vs earlier 8 candles (2h vs 2h lookback) for
+            a more stable signal than 4v4.
+
+        Returns "UP", "DOWN", or "FLAT".
         """
         cache_key = "dxy_trend"
         cached = self._cache.get(cache_key)
@@ -273,20 +329,25 @@ class SentimentData:
             result_data = data["chart"]["result"][0]
             closes = result_data["indicators"]["quote"][0]["close"]
 
-            # Filter out None values
             closes = [c for c in closes if c is not None]
-            if len(closes) < 4:
-                return "FLAT"
-
-            # Compare recent 4 candles vs earlier 4 candles for short-term trend
-            recent_avg = sum(closes[-4:]) / 4
-            earlier_avg = sum(closes[-8:-4]) / 4 if len(closes) >= 8 else sum(closes[:4]) / 4
+            if len(closes) < 16:
+                # Not enough data — fall back to 4v4 on a looser threshold
+                if len(closes) < 4:
+                    return "FLAT"
+                recent_avg = sum(closes[-4:]) / 4
+                earlier_avg = (
+                    sum(closes[-8:-4]) / 4 if len(closes) >= 8 else sum(closes[:4]) / 4
+                )
+            else:
+                # 2h recent vs 2h-prior — more stable, less noise
+                recent_avg = sum(closes[-8:]) / 8
+                earlier_avg = sum(closes[-16:-8]) / 8
 
             pct_change = ((recent_avg - earlier_avg) / earlier_avg) * 100
 
-            if pct_change > 0.05:
+            if pct_change > 0.02:
                 trend = "UP"
-            elif pct_change < -0.05:
+            elif pct_change < -0.02:
                 trend = "DOWN"
             else:
                 trend = "FLAT"

@@ -32,11 +32,12 @@ logger = logging.getLogger(__name__)
 class TelegramNotifier:
     """Simple Telegram notification sender (no polling — just push)."""
 
-    def __init__(self, config: TelegramConfig):
+    def __init__(self, config: TelegramConfig, account_label: str = ""):
         self.config = config
         self.enabled = config.enabled and config.bot_token and config.chat_id
         self.base_url = f"https://api.telegram.org/bot{config.bot_token}"
         self._client = httpx.Client(timeout=10.0) if self.enabled else None
+        self.label = account_label  # prepended to every message when set
 
         # Callbacks for commands (set by main.py)
         self._command_handlers: dict[str, Callable] = {}
@@ -46,6 +47,9 @@ class TelegramNotifier:
         if not self.enabled:
             logger.debug(f"Telegram disabled, would send: {message[:100]}...")
             return
+
+        if self.label and not message.startswith(f"[{self.label}]"):
+            message = f"[{self.label}] {message}"
 
         try:
             self._client.post(

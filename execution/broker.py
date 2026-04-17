@@ -306,6 +306,24 @@ class OandaBroker:
             logger.error(f"Failed to close trade {trade_id}: {e}")
             return False
 
+    def get_trade(self, trade_id: str) -> Optional[dict]:
+        """Fetch a single trade's full details (open or closed)."""
+        try:
+            resp = self._get(f"/v3/accounts/{self.account_id}/trades/{trade_id}")
+            return resp.get("trade")
+        except Exception as e:
+            logger.debug(f"get_trade({trade_id}) failed: {e}")
+            return None
+
+    def get_open_trade_ids(self) -> set[str]:
+        """Return broker_trade_id set for all currently open trades (light call)."""
+        try:
+            resp = self._get(f"/v3/accounts/{self.account_id}/openTrades")
+            return {str(t["id"]) for t in resp.get("trades", [])}
+        except Exception as e:
+            logger.debug(f"get_open_trade_ids failed: {e}")
+            return set()
+
     def close_all_positions(self) -> int:
         """Emergency: close ALL open positions. Returns count closed."""
         positions = self.get_open_positions()

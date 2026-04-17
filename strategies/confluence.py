@@ -74,8 +74,10 @@ class ConfluenceStrategy(Strategy):
 
     # ATR for SL/TP
     atr_period: int = 14
-    sl_atr_multiplier: float = 1.5
-    tp_atr_multiplier: float = 2.5  # tightened from 4.0 — trailing stop handles runners
+    # Widened 2026-04-16 from 1.5/2.5 → 2.5/4.0 — 67% of trades were hitting
+    # original SL with median MAE 18-23 pips vs SL ~17 pips (noise-band stops).
+    sl_atr_multiplier: float = 2.5
+    tp_atr_multiplier: float = 4.0
 
     # Score threshold — minimum confirmations to trade
     score_threshold: int = 6  # raised from 4 → 6 (was overtrading)
@@ -249,7 +251,9 @@ class ConfluenceStrategy(Strategy):
         signal = None
 
         # --- BUY signal ---
-        if buy_score >= self.score_threshold and daily_trend in ("UP", "FLAT"):
+        # Tightened 2026-04-16: drop FLAT — require explicit daily UP. FLAT let
+        # counter-trend trades through during NY session reversals.
+        if buy_score >= self.score_threshold and daily_trend == "UP":
             stop_loss = close - (current_atr * self.sl_atr_multiplier)
             take_profit = close + (current_atr * self.tp_atr_multiplier)
 
@@ -279,7 +283,8 @@ class ConfluenceStrategy(Strategy):
                 )
 
         # --- SELL signal ---
-        elif sell_score >= self.score_threshold and daily_trend in ("DOWN", "FLAT"):
+        # Tightened 2026-04-16: drop FLAT — require explicit daily DOWN.
+        elif sell_score >= self.score_threshold and daily_trend == "DOWN":
             stop_loss = close + (current_atr * self.sl_atr_multiplier)
             take_profit = close - (current_atr * self.tp_atr_multiplier)
 

@@ -61,6 +61,7 @@ class RiskManager:
         self.open_positions: list[Position] = []
         self.daily_pnl: float = 0.0
         self.daily_start_equity: float = 0.0
+        self._daily_peak_equity: float = 0.0  # tracks today's peak for trail lock
         self.trading_halted: bool = False
         self.halt_reason: str = ""
         self._news_events: list[dict] = []  # upcoming high-impact events
@@ -119,6 +120,28 @@ class RiskManager:
                 False, 0,
                 f"Correlated exposure too high: {effective_positions + corr_penalty:.1f} effective positions"
             )
+
+        # --- Rule 4b: Same-currency bucket exposure cap ---
+        # Prevent clustering like 6× BUY on EUR_USD/GBP_USD/AUD_USD/NZD_USD =
+        # effectively 6× short-USD. Cap same-direction same-currency exposure.
+        bucket_cap = getattr(self.config, "max_same_currency_exposure", 2)
+        long_ccy, short_ccy = self._signal_currency_exposure(signal)
+        long_count, short_count = self._count_currency_exposure(open_positions)
+        if long_ccy and long_count.get(long_ccy, 0) >= bucket_cap:
+            return RiskDecision(
+                False, 0,
+                f"Currency bucket cap: already {long_count[long_ccy]} positions LONG {long_ccy} (max {bucket_cap})"
+            )
+        if short_ccy and short_count.get(short_ccy, 0) >= bucket_cap:
+            return RiskDecision(
+                False, 0,
+                f"Currency bucket cap: already {short_count[short_ccy]} positions SHORT {short_ccy} (max {bucket_cap})"
+            )
+
+        # --- Rule 4c: Daily profit lock / equity trail ---
+        lock_reason = self._check_profit_lock()
+        if lock_reason:
+            return RiskDecision(False, 0, lock_reason)
 
         # --- Rule 5: Spread filter ---
         pair_info = FOREX_PAIRS.get(signal.instrument, {})
@@ -233,6 +256,67 @@ class RiskManager:
                 penalty += (self.config.max_correlated_exposure - 1.0) * abs(corr)
         return penalty
 
+    @staticmethod
+    def _signal_currency_exposure(signal: Signal) -> tuple[str, str]:
+        """Return (long_currency, short_currency) for the signal.
+
+        BUY EUR_USD → long EUR, short USD.
+        SELL GBP_JPY → long JPY, short GBP.
+        """
+        if "_" not in signal.instrument:
+            return "", ""
+        base, quote = signal.instrument.split("_", 1)
+        if signal.side == Side.BUY:
+            return base, quote
+        return quote, base
+
+    @staticmethod
+    def _count_currency_exposure(positions: list[Position]) -> tuple[dict, dict]:
+        """Return (long_counts, short_counts) by currency across open positions."""
+        long_counts: dict[str, int] = {}
+        short_counts: dict[str, int] = {}
+        for pos in positions:
+            if "_" not in pos.instrument:
+                continue
+            base, quote = pos.instrument.split("_", 1)
+            if pos.side == Side.BUY:
+                long_counts[base] = long_counts.get(base, 0) + 1
+                short_counts[quote] = short_counts.get(quote, 0) + 1
+            else:
+                long_counts[quote] = long_counts.get(quote, 0) + 1
+                short_counts[base] = short_counts.get(base, 0) + 1
+        return long_counts, short_counts
+
+    def _check_profit_lock(self) -> str:
+        """Return a blocking reason string if daily profit lock or equity trail triggered."""
+        lock_pct = getattr(self.config, "daily_profit_lock_pct", 0.0)
+        trail_pct = getattr(self.config, "daily_equity_trail_pct", 0.0)
+
+        if self.daily_start_equity <= 0:
+            return ""
+
+        daily_gain_pct = (self.daily_pnl / self.daily_start_equity) * 100
+
+        # Profit lock: already hit +X% today — stop opening new trades
+        if lock_pct > 0 and daily_gain_pct >= lock_pct:
+            return (
+                f"Daily profit lock: +{daily_gain_pct:.2f}% >= +{lock_pct:.1f}% "
+                f"— no new entries (runners continue)"
+            )
+
+        # Equity trail: dropped X% from today's peak equity
+        if trail_pct > 0 and self._daily_peak_equity > 0:
+            drop_pct = (
+                (self._daily_peak_equity - self.account.equity)
+                / self._daily_peak_equity * 100
+            )
+            if drop_pct >= trail_pct and self._daily_peak_equity > self.daily_start_equity:
+                return (
+                    f"Daily equity trail: -{drop_pct:.2f}% from peak "
+                    f"${self._daily_peak_equity:.2f} — no new entries"
+                )
+        return ""
+
     def _is_near_news_event(self, instrument: str) -> bool:
         """Check if there's a high-impact news event nearby.
 
@@ -269,6 +353,7 @@ class RiskManager:
         """Reset daily counters — call at start of each trading day."""
         self.daily_pnl = 0.0
         self.daily_start_equity = self.account.equity
+        self._daily_peak_equity = self.account.equity
         self.trading_halted = False
         self.halt_reason = ""
         logger.info(f"Daily reset — starting equity: ${self.daily_start_equity:.2f}")
@@ -279,6 +364,9 @@ class RiskManager:
         self.account = state
         if state.equity > self.account.peak_equity:
             self.account.peak_equity = state.equity
+        # Track today's intraday peak for daily_equity_trail_pct lock
+        if state.equity > self._daily_peak_equity:
+            self._daily_peak_equity = state.equity
 
     def _on_position_opened(self, position: Position):
         self.open_positions.append(position)

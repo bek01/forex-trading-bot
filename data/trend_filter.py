@@ -49,6 +49,7 @@ class TrendDirection:
         self.regime: str = "MIXED"        # TRENDING / RANGING / MIXED
         self.dxy_trend: str = "FLAT"      # UP / DOWN / FLAT (USD pairs only)
         self.retail_bias: str = "NEUTRAL" # LONG / SHORT / NEUTRAL
+        self.retail_pct_long: Optional[float] = None  # raw 0-100
         self.updated_at: Optional[datetime] = None
 
     @property
@@ -86,7 +87,9 @@ class GlobalTrendFilter:
         self._ema_period = 50
         self._adx_trending_threshold = 30.0
         self._adx_ranging_threshold = 20.0
-        self._retail_contrarian_threshold = 65.0  # >65% on one side
+        # Retail positioning — contrarian, HARD block at 75% (was 65% warn-only)
+        self._retail_contrarian_threshold = 65.0    # warn threshold
+        self._retail_hard_block_threshold = 75.0    # block threshold
 
     def update_trend(
         self,
@@ -131,6 +134,7 @@ class GlobalTrendFilter:
     def update_retail_positioning(self, instrument: str, pct_long: float):
         """Update retail positioning (contrarian indicator)."""
         td = self._trends.get(instrument, TrendDirection())
+        td.retail_pct_long = pct_long  # raw value for hard-block check
         if pct_long > self._retail_contrarian_threshold:
             td.retail_bias = "LONG"  # crowd is long → contrarian short
         elif pct_long < (100 - self._retail_contrarian_threshold):
@@ -207,10 +211,24 @@ class GlobalTrendFilter:
                     return False, f"BLOCKED: SELL {instrument} while DXY trending DOWN (USD weak)"
 
         # === RULE 4: Contrarian retail positioning ===
+        # Tightened 2026-04-16: HARD block when retail is >75% on our side
+        # (stored on the TrendDirection as retail_pct_long if available).
+        retail_pct = getattr(td, "retail_pct_long", None)
+        if retail_pct is not None:
+            if signal.side == Side.BUY and retail_pct >= self._retail_hard_block_threshold:
+                return False, (
+                    f"BLOCKED: BUY {instrument} but retail {retail_pct:.0f}% LONG "
+                    f"(>= {self._retail_hard_block_threshold:.0f}% contrarian)"
+                )
+            if signal.side == Side.SELL and (100.0 - retail_pct) >= self._retail_hard_block_threshold:
+                return False, (
+                    f"BLOCKED: SELL {instrument} but retail {100 - retail_pct:.0f}% SHORT "
+                    f"(>= {self._retail_hard_block_threshold:.0f}% contrarian)"
+                )
+
         if td.retail_bias != "NEUTRAL":
-            # If crowd is heavily LONG, contrarian says sell (or at least don't buy)
+            # At 65-75% — warn only
             if td.retail_bias == "LONG" and signal.side == Side.BUY:
-                # Don't hard block, but log warning
                 logger.warning(
                     f"WARNING: BUY {instrument} but {self._retail_contrarian_threshold}%+ "
                     f"retail is already LONG (contrarian bearish)"

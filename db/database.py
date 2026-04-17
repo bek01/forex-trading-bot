@@ -157,6 +157,25 @@ class Database:
         cursor = self.conn.execute("SELECT * FROM positions WHERE status = 'OPEN'")
         return [dict(row) for row in cursor.fetchall()]
 
+    def mark_position_closed(
+        self,
+        broker_trade_id: str,
+        exit_price: float,
+        realized_pnl: float,
+        close_reason: str,
+        closed_at: str,
+    ) -> bool:
+        """Update a position row to CLOSED. Keyed by broker_trade_id."""
+        cur = self.conn.execute(
+            """UPDATE positions
+                  SET status='CLOSED', exit_price=?, realized_pnl=?,
+                      close_reason=?, closed_at=?
+                WHERE broker_trade_id=? AND status='OPEN'""",
+            (exit_price, realized_pnl, close_reason, closed_at, broker_trade_id),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
     def get_closed_positions(self, limit: int = 100) -> list[dict]:
         cursor = self.conn.execute(
             "SELECT * FROM positions WHERE status = 'CLOSED' ORDER BY closed_at DESC LIMIT ?",

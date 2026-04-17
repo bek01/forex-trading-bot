@@ -36,8 +36,12 @@ from event_bus import Event, bus
 from execution.trailing_stop import ProfitManager
 from execution.broker import OandaBroker
 from execution.order_executor import OrderExecutor
+from execution.book_it import BookItRule
+from execution.withdrawal_alert import WithdrawalAlert
+from execution.weekend_flatten import WeekendFlattenRule
 from models import AccountState, Position, Signal, Tick
 from monitoring.telegram_bot import TelegramNotifier, TelegramPoller
+from monitoring.daily_report import DailyReport
 from risk.risk_manager import RiskManager
 from risk.pair_guard import PairGuard
 from strategies.base import Strategy
@@ -102,6 +106,10 @@ class TradingBot:
         self.sentiment: Optional[SentimentData] = None
         self.trailing_stop: Optional[ProfitManager] = None
         self.pair_guard: Optional[PairGuard] = None
+        self.book_it: Optional[BookItRule] = None
+        self.withdrawal_alert: Optional[WithdrawalAlert] = None
+        self.weekend_flatten: Optional[WeekendFlattenRule] = None
+        self.daily_report: Optional[DailyReport] = None
 
         # Strategies
         self.strategies: list[Strategy] = []
@@ -110,6 +118,7 @@ class TradingBot:
         self._last_heartbeat = 0.0
         self._last_account_sync = 0.0
         self._last_equity_snapshot = 0.0
+        self._last_reconcile = 0.0
         self._last_daily_reset: Optional[str] = None
 
         # Account state
@@ -126,7 +135,8 @@ class TradingBot:
         self.broker = OandaBroker(self.config.broker)
         self.risk_manager = RiskManager(self.config.risk)
         self.executor = OrderExecutor(self.broker, self.config)
-        self.telegram = TelegramNotifier(self.config.telegram)
+        account_label = "LIVE" if self.config.trading_mode == "live" else "DEMO"
+        self.telegram = TelegramNotifier(self.config.telegram, account_label=account_label)
 
         # Trend filter + sentiment — prevents counter-trend trading
         self.trend_filter = GlobalTrendFilter()
@@ -160,6 +170,54 @@ class TradingBot:
             initial_block_days=7,           # first block: 7 days
             max_block_days=90,              # max block: 90 days
             backoff_multiplier=2.0,         # double each time: 7→14→28→56→90
+        )
+
+        # Book-It — close profitable trades at London close to lock gains.
+        # Thresholds scale with trading mode (live is £100 acct, demo is £100K).
+        is_live = self.config.trading_mode == "live"
+        self.book_it = BookItRule(
+            broker=self.broker,
+            trigger_hour_utc=17,
+            trigger_minute_utc=0,
+            min_profit_usd=0.30 if is_live else 30.0,
+            min_profit_pips=5.0,
+        )
+
+        # Weekly withdrawal alert — only on live account.
+        # OANDA has NO programmatic transfer endpoint; this logs the action
+        # for the user to execute manually via OANDA Hub.
+        if is_live:
+            self.withdrawal_alert = WithdrawalAlert(
+                target_balance=100.0,            # keep the £100 float
+                savings_account_id="5302313",
+                min_transfer_amount=5.0,
+                trigger_hour_utc=20,             # 20:55 UTC Fri ≈ NY close
+                trigger_minute_utc=55,
+                telegram_notifier=(
+                    self.telegram.send if self.config.telegram.enabled else None
+                ),
+            )
+
+        # Daily P&L report — fires Mon-Fri at 21:05 UTC (post-NY close)
+        self.daily_report = DailyReport(
+            db_path=self.config.db_path,
+            telegram_notifier=self.telegram,
+            account_label="LIVE" if is_live else "DEMO",
+            trigger_hour_utc=21,
+            trigger_minute_utc=5,
+            skip_weekends=True,
+        )
+
+        # Weekend Flatten — close ALL open trades Fri 20:00 UTC
+        # before FX weekend close. Runs on both demo and live.
+        self.weekend_flatten = WeekendFlattenRule(
+            broker=self.broker,
+            trigger_hour_utc=20,
+            trigger_minute_utc=0,
+            close_all=True,
+            telegram_notifier=(
+                self.telegram.send if self.config.telegram.enabled else None
+            ),
         )
 
         # Load strategies
@@ -268,10 +326,45 @@ class TradingBot:
                 if self.trailing_stop:
                     self.trailing_stop.check_and_update(check_interval_sec=10.0)
 
+                # --- Book-It: close profitable positions at session close ---
+                if self.book_it:
+                    try:
+                        self.book_it.check_and_run()
+                    except Exception as e:
+                        logger.error(f"Book-It check failed: {e}")
+
+                # --- Weekend Flatten: close ALL trades Fri 20:00 UTC ---
+                if self.weekend_flatten:
+                    try:
+                        self.weekend_flatten.check_and_run()
+                    except Exception as e:
+                        logger.error(f"Weekend-Flatten check failed: {e}")
+
+                # --- Weekly withdrawal alert (live only) ---
+                if self.withdrawal_alert and self.account.balance > 0:
+                    try:
+                        self.withdrawal_alert.check_and_run(self.account.balance)
+                    except Exception as e:
+                        logger.error(f"Withdrawal alert check failed: {e}")
+
+                # --- Daily P&L report ---
+                if self.daily_report and self.account.equity > 0:
+                    try:
+                        self.daily_report.check_and_run(
+                            self.account.equity, self.account.balance
+                        )
+                    except Exception as e:
+                        logger.error(f"Daily report check failed: {e}")
+
                 # --- Sync account state ---
                 if now - self._last_account_sync >= self.config.account_sync_interval_sec:
                     self._sync_account()
                     self._last_account_sync = now
+
+                # --- Reconcile closed trades (every 60s) ---
+                if now - self._last_reconcile >= 60.0:
+                    self._reconcile_closed_trades()
+                    self._last_reconcile = now
 
                 # --- Equity snapshot ---
                 if now - self._last_equity_snapshot >= self.config.equity_snapshot_interval_sec:
@@ -319,6 +412,21 @@ class TradingBot:
         if timeframe == "H1" and instrument == "EUR_USD" and self.sentiment:
             try:
                 dxy = self.sentiment.get_dxy_trend()
+                # Fallback: compute USD basket from OANDA H1 closes if Yahoo
+                # returns FLAT (happens often with the new tightened threshold).
+                if dxy == "FLAT":
+                    h1_closes = {}
+                    for ins in ("EUR_USD", "GBP_USD", "AUD_USD", "NZD_USD",
+                                "USD_JPY", "USD_CHF", "USD_CAD"):
+                        try:
+                            cs = self.candle_manager.get_candles(ins, "H1")
+                            h1_closes[ins] = [c.close for c in cs[-20:]]
+                        except Exception:
+                            pass
+                    basket = self.sentiment.get_usd_basket_trend(h1_closes)
+                    if basket != "FLAT":
+                        logger.debug(f"USD basket fallback: {basket} (Yahoo DXY was FLAT)")
+                        dxy = basket
                 self.trend_filter.update_dxy(dxy)
             except Exception:
                 pass
@@ -418,19 +526,37 @@ class TradingBot:
         )
 
     def _on_position_closed(self, data: dict):
-        """Log closed position, notify, and record in pair guard."""
+        """Log closed position, persist to DB, notify, and record in pair guard."""
+        broker_trade_id = str(data.get("broker_trade_id", "") or "")
+        exit_price = float(data.get("exit_price", 0) or 0)
+        realized_pnl = float(data.get("realized_pnl", 0) or 0)
+        close_reason = data.get("close_reason", "") or ""
+        closed_at = data.get("closed_at") or datetime.now(timezone.utc).isoformat()
+
+        # Persist to DB
+        if self.db and broker_trade_id:
+            try:
+                self.db.mark_position_closed(
+                    broker_trade_id=broker_trade_id,
+                    exit_price=exit_price,
+                    realized_pnl=realized_pnl,
+                    close_reason=close_reason,
+                    closed_at=closed_at,
+                )
+            except Exception as e:
+                logger.error(f"DB close update failed for {broker_trade_id}: {e}")
+
         # Record result in pair guard for auto-block tracking
         if self.pair_guard:
             instrument = data.get("instrument", "")
-            pnl = data.get("realized_pnl", 0)
-            if instrument and pnl != 0:
-                self.pair_guard.record_trade(instrument, pnl)
+            if instrument and realized_pnl != 0:
+                self.pair_guard.record_trade(instrument, realized_pnl)
 
         self.telegram.notify_trade_closed(
             data.get("instrument", ""),
             data.get("side", ""),
-            data.get("realized_pnl", 0),
-            data.get("close_reason", ""),
+            realized_pnl,
+            close_reason,
             data.get("strategy", ""),
         )
 
@@ -471,6 +597,66 @@ class TradingBot:
             bus.emit(Event.ACCOUNT_UPDATE, self.account)
         except Exception as e:
             logger.error(f"Account sync failed: {e}")
+
+    def _reconcile_closed_trades(self):
+        """Detect trades closed on broker side (SL/TP/manual) and emit POSITION_CLOSED.
+
+        Compares broker open-trade IDs vs DB-open positions with a broker_trade_id.
+        Any DB-open position whose broker_trade_id is no longer open on the broker
+        is considered closed — fetch final state from broker and emit event.
+        """
+        if not self.broker or not self.db:
+            return
+        try:
+            broker_open_ids = self.broker.get_open_trade_ids()
+        except Exception as e:
+            logger.debug(f"Reconcile: failed to list open trades: {e}")
+            return
+
+        try:
+            db_open = self.db.get_open_positions()
+        except Exception as e:
+            logger.debug(f"Reconcile: failed to read DB open positions: {e}")
+            return
+
+        for row in db_open:
+            btid = str(row.get("broker_trade_id") or "")
+            if not btid or btid in broker_open_ids:
+                continue
+            trade = self.broker.get_trade(btid)
+            if not trade or trade.get("state", "OPEN") == "OPEN":
+                continue
+
+            close_price = float(trade.get("averageClosePrice", 0) or 0)
+            realized_pnl = float(trade.get("realizedPL", 0) or 0)
+            close_time = trade.get("closeTime") or datetime.now(timezone.utc).isoformat()
+
+            # Infer close reason from trade fields
+            reason = "manual"
+            sl_order = trade.get("stopLossOrder") or {}
+            tp_order = trade.get("takeProfitOrder") or {}
+            sl_price = float(sl_order.get("price", 0) or 0)
+            tp_price = float(tp_order.get("price", 0) or 0)
+            if sl_price and abs(close_price - sl_price) / max(close_price, 1e-9) < 0.0005:
+                reason = "stop_loss"
+            elif tp_price and abs(close_price - tp_price) / max(close_price, 1e-9) < 0.0005:
+                reason = "take_profit"
+
+            bus.emit(Event.POSITION_CLOSED, {
+                "broker_trade_id": btid,
+                "instrument": row.get("instrument", ""),
+                "side": row.get("side", ""),
+                "strategy": row.get("strategy", ""),
+                "exit_price": close_price,
+                "realized_pnl": realized_pnl,
+                "close_reason": reason,
+                "closed_at": close_time,
+                "id": row.get("id"),
+            })
+            logger.info(
+                f"Reconciled close: {row.get('instrument')} trade={btid} "
+                f"reason={reason} pnl=${realized_pnl:+.2f}"
+            )
 
     def _save_equity_snapshot(self):
         """Save periodic equity snapshot to DB."""

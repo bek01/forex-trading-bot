@@ -56,15 +56,23 @@ class RiskConfig(BaseSettings):
     max_risk_per_trade_pct: float = 0.5         # Risk 0.5% per trade (£500 on 100K)
     max_risk_per_trade_usd: float = 500.0       # Hard cap in GBP per trade
 
-    # Position limits — expanded for 24/5 multi-pair trading
-    max_open_positions: int = 10                # was 3 — now trading 23 pairs
+    # Position limits — tightened 2026-04-16 after clustering blowup
+    max_open_positions: int = 6                 # was 10 — too many correlated USD-shorts
     max_correlated_exposure: float = 1.5        # Correlated pairs count as 1.5x
+    # Max positions exposing the same base currency in the same direction.
+    # e.g. BUY EUR_USD + BUY GBP_USD + BUY AUD_USD = 3 USD-shorts; caps at 2.
+    max_same_currency_exposure: int = 2
 
     # Drawdown limits
     daily_loss_limit_pct: float = 3.0           # Stop trading if daily loss > 3% (£3K on 100K)
     max_drawdown_warning_pct: float = 5.0       # Alert at 5% drawdown from peak
     max_drawdown_critical_pct: float = 8.0      # Reduce size at 8%
     max_drawdown_halt_pct: float = 10.0         # Kill switch at 10% from peak
+
+    # Daily profit lock — when reached, stop opening NEW trades (existing runners continue)
+    daily_profit_lock_pct: float = 2.0          # Halt new entries after +2% daily
+    # Intraday equity trail — if equity drops N% from daily peak, stop opening new trades
+    daily_equity_trail_pct: float = 1.5         # Pause after -1.5% from today's peak
 
     # Spread protection
     max_spread_multiplier: float = 2.0          # Skip if spread > 2x average

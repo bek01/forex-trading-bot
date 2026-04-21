@@ -204,6 +204,12 @@ class ProfitManager:
                     f"{instrument} trade {trade_id}"
                 )
             state["stage"] = 1
+            # BUGFIX 2026-04-21: refresh local current_sl so the trailing block
+            # below doesn't overwrite the lock we just set. `current_sl` was
+            # read once at the top of _process_trade and would otherwise be
+            # stale after the _update_sl call, causing the trail to move the
+            # SL BACKWARDS (less profit locked).
+            current_sl = lock_price
 
         # === STAGE 2: +20 pips → close 25% more, start trailing ===
         if profit_pips >= self.stage2_pips and state["stage"] < 2:

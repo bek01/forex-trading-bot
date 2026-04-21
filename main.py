@@ -160,14 +160,20 @@ class TradingBot:
         # all gains on range-y pairs (EUR_GBP returned to entry and closed at $0).
         self.trailing_stop = ProfitManager(
             broker=self.broker,
-            stage1_pips=10.0,          # +10 pips → close 25%, LOCK +3 pips
-            stage2_pips=20.0,          # +20 pips → close 25% more, wider trail
-            stage3_pips=30.0,          # +30 pips → close 25% more, tighten trail
+            # 2026-04-21: tightened 10/20/30 → 5/10/15. Rationale: analysis
+            # of 15 recent trades (db/trades.db) showed zero winners reached
+            # old stage 2 or 3; most winners exited at 2-15 pips. Flagged as
+            # REACTIVE TUNING in memory — revisit at Jun 2 review with ~40d
+            # of data. 15 trades is small — if this triggers early stage-1
+            # closes that would've become larger runners, revert to 10/20/30.
+            stage1_pips=5.0,           # +5 pips → close 25%, LOCK +3 pips
+            stage2_pips=10.0,          # +10 pips → close 25% more
+            stage3_pips=15.0,          # +15 pips → close 25% more, tighten trail
             stage1_close_pct=0.25,
             stage2_close_pct=0.25,
             stage3_close_pct=0.25,
-            stage1_lock_pips=3.0,      # NEW: lock +3 pips at stage 1 (was BE)
-            trail_stage1_pips=5.0,     # NEW: tighter trail during stage 1 (was 10)
+            stage1_lock_pips=3.0,      # lock +3 pips at stage 1
+            trail_stage1_pips=5.0,     # stage 1 trail
             trail_distance_pips=10.0,  # stage 2 trail
             trail_tight_pips=7.0,      # stage 3+ trail
             min_trail_step_pips=3.0,

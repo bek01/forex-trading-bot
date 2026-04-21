@@ -111,7 +111,14 @@ class SentimentData:
             resp.raise_for_status()
             data = resp.json()
         except (requests.RequestException, ValueError) as exc:
-            logger.warning(f"OANDA order book failed for {instrument}: {exc}")
+            # 401 is expected on accounts without orderBook access — downgrade
+            # to debug so it doesn't flood logs every H1 candle. Other errors
+            # stay at warning.
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status == 401:
+                logger.debug(f"OANDA order book unavailable (401) for {instrument}")
+            else:
+                logger.warning(f"OANDA order book failed for {instrument}: {exc}")
             return None
 
         try:

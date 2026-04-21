@@ -51,6 +51,7 @@ from strategies.london_breakout import LondonBreakoutStrategy
 from strategies.confluence import ConfluenceStrategy
 from strategies.session_momentum import SessionMomentumStrategy
 from strategies.stat_arb import StatArbStrategy
+from strategies.range_scalp import RangeScalpStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +140,12 @@ class TradingBot:
         self.telegram = TelegramNotifier(self.config.telegram, account_label=account_label)
 
         # Trend filter + sentiment — prevents counter-trend trading
-        self.trend_filter = GlobalTrendFilter()
+        # 2026-04-21: honour disable_trend_filter flag (env: DISABLE_TREND_FILTER)
+        if getattr(self.config, "disable_trend_filter", False):
+            self.trend_filter = None
+            logger.warning("TREND FILTER DISABLED via config — all signals reach risk manager")
+        else:
+            self.trend_filter = GlobalTrendFilter()
         try:
             self.sentiment = SentimentData(
                 self.config.broker.api_token,
@@ -150,27 +156,36 @@ class TradingBot:
             self.sentiment = None
 
         # Profit manager — partial profit scaling + trailing stops
+        # 2026-04-17: tightened stage-1 — breakeven exits were giving back
+        # all gains on range-y pairs (EUR_GBP returned to entry and closed at $0).
         self.trailing_stop = ProfitManager(
             broker=self.broker,
-            stage1_pips=10.0,        # +10 pips → close 25%, SL to breakeven
-            stage2_pips=20.0,        # +20 pips → close 25% more, start trailing
-            stage3_pips=30.0,        # +30 pips → close 25% more, tighten trail
-            stage1_close_pct=0.25,   # close 25% at each stage
+            stage1_pips=10.0,          # +10 pips → close 25%, LOCK +3 pips
+            stage2_pips=20.0,          # +20 pips → close 25% more, wider trail
+            stage3_pips=30.0,          # +30 pips → close 25% more, tighten trail
+            stage1_close_pct=0.25,
             stage2_close_pct=0.25,
             stage3_close_pct=0.25,
-            trail_distance_pips=10.0,  # trail 10 pips behind after stage 2
-            trail_tight_pips=7.0,      # tighter 7 pip trail after stage 3
+            stage1_lock_pips=3.0,      # NEW: lock +3 pips at stage 1 (was BE)
+            trail_stage1_pips=5.0,     # NEW: tighter trail during stage 1 (was 10)
+            trail_distance_pips=10.0,  # stage 2 trail
+            trail_tight_pips=7.0,      # stage 3+ trail
             min_trail_step_pips=3.0,
         )
 
         # Pair guard — auto-blocks consistently losing pairs
-        self.pair_guard = PairGuard(
-            state_file=self.config.db_path.replace("trades", "pair_guard").replace(".db", ".json"),
-            consecutive_losses_to_block=3,  # block after 3 losses in a row
-            initial_block_days=7,           # first block: 7 days
-            max_block_days=90,              # max block: 90 days
-            backoff_multiplier=2.0,         # double each time: 7→14→28→56→90
-        )
+        # 2026-04-21: honour disable_pair_guard flag (env: DISABLE_PAIR_GUARD)
+        if getattr(self.config, "disable_pair_guard", False):
+            self.pair_guard = None
+            logger.warning("PAIR GUARD DISABLED via config — no per-pair blocks")
+        else:
+            self.pair_guard = PairGuard(
+                state_file=self.config.db_path.replace("trades", "pair_guard").replace(".db", ".json"),
+                consecutive_losses_to_block=3,  # block after 3 losses in a row
+                initial_block_days=3,           # lowered 7→3 on 2026-04-20
+                max_block_days=90,              # max block: 90 days
+                backoff_multiplier=2.0,         # double each time: 3→6→12→24→48
+            )
 
         # Book-It — close profitable trades at London close to lock gains.
         # Thresholds scale with trading mode (live is £100 acct, demo is £100K).
@@ -254,6 +269,22 @@ class TradingBot:
         logger.info("Loading candle history...")
         self.candle_manager.initialize()
 
+        # Bootstrap trend filter from historical candles so strategies aren't
+        # blocked by "no trend data" for up to 4h after restart.
+        if self.trend_filter:
+            warmed = 0
+            for instrument in self.config.strategy.instruments:
+                try:
+                    h4 = self.candle_manager.get_candles(instrument, "H4")
+                    daily = self.candle_manager.get_candles(instrument, "D")
+                    h1 = self.candle_manager.get_candles(instrument, "H1")
+                    if h4 and daily and h1:
+                        self.trend_filter.update_trend(instrument, h4, daily, h1)
+                        warmed += 1
+                except Exception as e:
+                    logger.debug(f"Trend filter warmup {instrument}: {e}")
+            logger.info(f"Trend filter warmed up for {warmed} instruments")
+
         # Notify
         strategy_names = [s.name for s in self.strategies if s.enabled]
         self.telegram.notify_startup(
@@ -281,6 +312,8 @@ class TradingBot:
             self.strategies.append(SessionMomentumStrategy())
         if cfg.stat_arb_enabled:
             self.strategies.append(StatArbStrategy())
+        if cfg.range_scalp_enabled:
+            self.strategies.append(RangeScalpStrategy())
 
         enabled = [s.name for s in self.strategies if s.enabled]
         logger.info(f"Strategies loaded: {enabled}")
@@ -397,6 +430,7 @@ class TradingBot:
         """Feed new candle to all strategies + update trend filter."""
         instrument = data["instrument"]
         timeframe = data["timeframe"]
+        logger.debug(f"CANDLE_CLOSE: {instrument}/{timeframe}")
 
         # --- Update global trend filter on H4/D/H1 candle closes ---
         if timeframe in ("H4", "D", "H1") and self.trend_filter:
@@ -409,7 +443,12 @@ class TradingBot:
                 logger.debug(f"Trend filter update error {instrument}: {e}")
 
         # --- Update DXY + positioning periodically ---
-        if timeframe == "H1" and instrument == "EUR_USD" and self.sentiment:
+        if (
+            timeframe == "H1"
+            and instrument == "EUR_USD"
+            and self.sentiment
+            and self.trend_filter
+        ):
             try:
                 dxy = self.sentiment.get_dxy_trend()
                 # Fallback: compute USD basket from OANDA H1 closes if Yahoo

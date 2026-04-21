@@ -75,6 +75,11 @@ MEAN_REVERSION_STRATEGIES = {"mean_reversion"}
 # Strategies that should be BLOCKED in ranging markets
 TREND_STRATEGIES = {"trend_following"}
 
+# Strategies allowed to fire when H4/D consensus is FLAT, provided the regime
+# is RANGING (ADX < ranging threshold). These are built for chop and should
+# not be gated by the higher-timeframe trend alignment check.
+RANGE_STRATEGIES = {"mean_reversion", "session_momentum", "stat_arb", "range_scalp"}
+
 
 class GlobalTrendFilter:
     """
@@ -160,24 +165,58 @@ class GlobalTrendFilter:
         consensus = td.consensus
 
         # === RULE 0: Block when trend is unknown (H4 or D is FLAT/conflicting) ===
+        # Exception: range strategies are allowed to fire in FLAT consensus
+        # IF the H1 regime is RANGING (ADX < ranging threshold). These strategies
+        # are built for chop and don't benefit from higher-timeframe alignment.
         if consensus == "FLAT":
-            # H4 and D disagree or both unknown — no directional confidence
-            return False, (
-                f"BLOCKED: no clear trend for {instrument} "
-                f"(H4={td.h4_trend}, D={td.daily_trend}) — waiting for alignment"
-            )
+            if (
+                signal.strategy in RANGE_STRATEGIES
+                and td.regime == "RANGING"
+            ):
+                logger.info(
+                    f"Trend filter: {instrument} FLAT consensus but "
+                    f"{signal.strategy} allowed in RANGING regime "
+                    f"(ADX={td.h1_adx:.0f})"
+                )
+            else:
+                # H4 and D disagree or both unknown — no directional confidence
+                return False, (
+                    f"BLOCKED: no clear trend for {instrument} "
+                    f"(H4={td.h4_trend}, D={td.daily_trend}) — waiting for alignment"
+                )
 
         # === RULE 1: Block counter-trend trades ===
-        if consensus == "UP" and signal.side == Side.SELL:
+        # Exception: a RANGING regime (H1 ADX < ranging threshold) means the
+        # "trend" is only a mild EMA slope with no real momentum. Range
+        # strategies (mean_reversion, range_scalp, session_momentum, stat_arb)
+        # are allowed to fade such weak trends. Directional strategies
+        # (trend_following, confluence, london_breakout) still respect the
+        # counter-trend block.
+        is_range_strat_in_range = (
+            signal.strategy in RANGE_STRATEGIES
+            and td.regime == "RANGING"
+        )
+
+        if consensus == "UP" and signal.side == Side.SELL and not is_range_strat_in_range:
             return False, (
                 f"BLOCKED: SELL against uptrend "
                 f"(H4={td.h4_trend}, D={td.daily_trend}, ADX={td.h1_adx:.0f})"
             )
 
-        if consensus == "DOWN" and signal.side == Side.BUY:
+        if consensus == "DOWN" and signal.side == Side.BUY and not is_range_strat_in_range:
             return False, (
                 f"BLOCKED: BUY against downtrend "
                 f"(H4={td.h4_trend}, D={td.daily_trend}, ADX={td.h1_adx:.0f})"
+            )
+
+        if is_range_strat_in_range and (
+            (consensus == "UP" and signal.side == Side.SELL)
+            or (consensus == "DOWN" and signal.side == Side.BUY)
+        ):
+            logger.info(
+                f"Trend filter: counter-trend allowed for {signal.strategy} "
+                f"on {instrument} in RANGING regime "
+                f"(consensus={consensus}, ADX={td.h1_adx:.0f})"
             )
 
         # === RULE 2: Regime-based strategy filtering ===

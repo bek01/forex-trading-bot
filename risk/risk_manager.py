@@ -213,6 +213,10 @@ class RiskManager:
         ATR-based position sizing: risk X% of equity per trade.
 
         Formula: units = risk_amount / (stop_loss_distance_in_price)
+
+        A strategy may pass `risk_multiplier` (float, default 1.0) in the
+        signal metadata to shrink (or expand) its per-trade risk. Used by
+        `range_scalp` to size at 25% of normal risk.
         """
         equity = self.account.equity
         if equity <= 0:
@@ -221,6 +225,17 @@ class RiskManager:
         # Risk amount = min(pct of equity, hard cap)
         risk_pct_amount = equity * (self.config.max_risk_per_trade_pct / 100.0)
         risk_amount = min(risk_pct_amount, self.config.max_risk_per_trade_usd)
+
+        # Per-signal risk multiplier (1.0 = normal, 0.25 = quarter risk)
+        meta = getattr(signal, "metadata", None) or {}
+        mult = meta.get("risk_multiplier", 1.0)
+        try:
+            mult = float(mult)
+        except (TypeError, ValueError):
+            mult = 1.0
+        # Clamp to sane range [0.05, 2.0]
+        mult = max(0.05, min(mult, 2.0))
+        risk_amount *= mult
 
         # Stop loss distance in price
         sl_distance = abs(signal.entry_price - signal.stop_loss)

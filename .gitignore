@@ -7,6 +7,8 @@ db/*.db
 db/*.db-shm
 db/*.db-wal
 db/*.json
+db/*.bak.*
+db/hist_cache/
 *.log
 logs/
 .venv/

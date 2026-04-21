@@ -154,6 +154,42 @@ class OandaBroker:
             ))
         return candles
 
+    # --- Instruments / financing ---
+
+    def get_instrument_financing(self, instrument: str) -> Optional[dict]:
+        """Fetch OANDA's published financing (swap) rates for an instrument.
+
+        Returns dict with `longRate` and `shortRate` (annualised, decimal).
+        Used by the carry strategy. Returns None on failure.
+
+        Note: OANDA updates these rates intermittently. Safe to poll daily.
+        """
+        try:
+            resp = self._get(
+                f"/v3/accounts/{self.account_id}/instruments",
+                params={"instruments": instrument},
+            )
+            instruments = resp.get("instruments", [])
+            if not instruments:
+                return None
+            info = instruments[0]
+            financing = info.get("financing", {})
+            long_rate = float(financing.get("longRate", 0))
+            short_rate = float(financing.get("shortRate", 0))
+            return {
+                "instrument": instrument,
+                "long_rate": long_rate,
+                "short_rate": short_rate,
+                # Net carry earned holding long for a year (decimal)
+                "carry_long": long_rate,
+                # Net carry earned holding short for a year (decimal) — note
+                # OANDA's short rate is typically negative; we report it as-is
+                "carry_short": short_rate,
+            }
+        except Exception as e:
+            logger.debug(f"Financing fetch failed {instrument}: {e}")
+            return None
+
     # --- Orders ---
 
     def place_order(self, order: Order) -> Order:
@@ -375,21 +411,72 @@ class OandaBroker:
                     continue
 
     # --- HTTP helpers ---
+    # Retry policy for transient broker/network errors:
+    #   - 5xx (server), 429 (rate limit), connection/timeout errors → retry
+    #   - 4xx (auth, bad request, not found) → fail immediately, no retry
+    # Total attempts: 3 (initial + 2 retries) with 0.5s, 1.5s backoff.
+    # At 23 pairs × 5 timeframes = 115 poll calls per cycle, deeper retries
+    # stall the whole poll loop during outages, so we stay conservative.
+
+    _RETRY_STATUS = {429, 500, 502, 503, 504}
+    _RETRY_BACKOFF = (0.5, 1.5)  # seconds between attempts
+    _TRANSIENT_EXC = (
+        httpx.ConnectError,
+        httpx.ConnectTimeout,
+        httpx.ReadTimeout,
+        httpx.ReadError,
+        httpx.RemoteProtocolError,
+    )
+
+    def _request(self, method: str, path: str, **kwargs) -> dict:
+        """Single HTTP request with retry for transient errors."""
+        last_exc: Optional[Exception] = None
+        for attempt in range(1 + len(self._RETRY_BACKOFF)):
+            try:
+                resp = self.client.request(method, path, **kwargs)
+                if resp.status_code in self._RETRY_STATUS:
+                    # Transient HTTP error — fall through to retry logic
+                    last_exc = httpx.HTTPStatusError(
+                        f"HTTP {resp.status_code}",
+                        request=resp.request,
+                        response=resp,
+                    )
+                    if attempt < len(self._RETRY_BACKOFF):
+                        delay = self._RETRY_BACKOFF[attempt]
+                        logger.debug(
+                            f"OANDA {resp.status_code} {method} {path} "
+                            f"(attempt {attempt+1}) — retry in {delay}s"
+                        )
+                        time.sleep(delay)
+                        continue
+                    # Exhausted — surface as error
+                    resp.raise_for_status()
+                resp.raise_for_status()  # 4xx → raises immediately, no retry
+                return resp.json()
+            except self._TRANSIENT_EXC as exc:
+                last_exc = exc
+                if attempt < len(self._RETRY_BACKOFF):
+                    delay = self._RETRY_BACKOFF[attempt]
+                    logger.debug(
+                        f"OANDA {type(exc).__name__} {method} {path} "
+                        f"(attempt {attempt+1}) — retry in {delay}s"
+                    )
+                    time.sleep(delay)
+                    continue
+                raise
+        # Should not reach here, but defensively re-raise the last error
+        if last_exc:
+            raise last_exc
+        raise RuntimeError(f"OANDA request failed: {method} {path}")
 
     def _get(self, path: str, params: dict = None) -> dict:
-        resp = self.client.get(path, params=params)
-        resp.raise_for_status()
-        return resp.json()
+        return self._request("GET", path, params=params)
 
     def _post(self, path: str, json: dict = None) -> dict:
-        resp = self.client.post(path, json=json)
-        resp.raise_for_status()
-        return resp.json()
+        return self._request("POST", path, json=json)
 
     def _put(self, path: str, json: dict = None) -> dict:
-        resp = self.client.put(path, json=json)
-        resp.raise_for_status()
-        return resp.json()
+        return self._request("PUT", path, json=json)
 
     def close(self):
         """Clean up HTTP client."""

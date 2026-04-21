@@ -35,7 +35,7 @@ class PairGuard:
         self,
         state_file: str = DEFAULT_STATE_FILE,
         consecutive_losses_to_block: int = 3,
-        initial_block_days: int = 7,
+        initial_block_days: int = 3,  # 2026-04-20: lowered 7→3; backoff still doubles
         max_block_days: int = 90,
         backoff_multiplier: float = 2.0,
     ):
@@ -144,9 +144,15 @@ class PairGuard:
         pair["total_pnl"] = pair.get("total_pnl", 0) + pnl
 
         if pnl > 0:
-            # WIN — reset consecutive loss counter
+            # WIN — reset consecutive loss counter and clear any active block
             pair["total_wins"] = pair.get("total_wins", 0) + 1
             pair["consecutive_losses"] = 0
+            if pair.get("blocked_until"):
+                logger.info(
+                    f"PairGuard: {instrument} won — clearing block "
+                    f"(was blocked until {pair['blocked_until']})"
+                )
+                pair["blocked_until"] = None
             # If this is the first win after a re-enable, reset block count
             if pair.get("block_count", 0) > 0:
                 logger.info(

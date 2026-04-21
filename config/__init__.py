@@ -124,6 +124,7 @@ class StrategyConfig(BaseSettings):
     confluence_enabled: bool = True
     session_momentum_enabled: bool = True
     stat_arb_enabled: bool = True
+    range_scalp_enabled: bool = True  # 2026-04-20: fills ADX 15-25 FLAT gap
 
     # Candle buffer size (how many candles to keep in memory per instrument/timeframe)
     candle_buffer_size: int = 300  # reduced from 500 — more pairs, less depth needed
@@ -155,6 +156,12 @@ class AppConfig(BaseSettings):
     log_level: str = "INFO"
     db_path: str = "db/trades.db"
     account_currency: str = "GBP"  # Account denomination
+
+    # Gate toggles — 2026-04-21: allow unblocking the current architecture
+    # without deleting code. Set true in .env to skip the global trend filter
+    # and/or the pair guard for this bot instance. Risk manager always runs.
+    disable_trend_filter: bool = False
+    disable_pair_guard: bool = False
 
     # Main loop timing
     heartbeat_interval_sec: int = 60

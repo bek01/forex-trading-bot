@@ -250,10 +250,15 @@ class ConfluenceStrategy(Strategy):
 
         signal = None
 
+        # --- BUY / SELL gate ---
+        # Tightened 2026-04-16: require explicit daily UP / DOWN.
+        # Relaxed 2026-04-20: allow FLAT daily IF score is 7/7 (all
+        # confirmations aligned) — prevents total lockout on chop days.
+        allow_buy_flat = daily_trend == "FLAT" and buy_score >= 7
+        allow_sell_flat = daily_trend == "FLAT" and sell_score >= 7
+
         # --- BUY signal ---
-        # Tightened 2026-04-16: drop FLAT — require explicit daily UP. FLAT let
-        # counter-trend trades through during NY session reversals.
-        if buy_score >= self.score_threshold and daily_trend == "UP":
+        if buy_score >= self.score_threshold and (daily_trend == "UP" or allow_buy_flat):
             stop_loss = close - (current_atr * self.sl_atr_multiplier)
             take_profit = close + (current_atr * self.tp_atr_multiplier)
 
@@ -283,8 +288,7 @@ class ConfluenceStrategy(Strategy):
                 )
 
         # --- SELL signal ---
-        # Tightened 2026-04-16: drop FLAT — require explicit daily DOWN.
-        elif sell_score >= self.score_threshold and daily_trend == "DOWN":
+        elif sell_score >= self.score_threshold and (daily_trend == "DOWN" or allow_sell_flat):
             stop_loss = close + (current_atr * self.sl_atr_multiplier)
             take_profit = close - (current_atr * self.tp_atr_multiplier)
 

@@ -35,15 +35,18 @@ class ProfitManager:
         self,
         broker: OandaBroker,
         # Partial close stages (in pips of profit)
-        stage1_pips: float = 10.0,   # close 25%, SL to breakeven
-        stage2_pips: float = 20.0,   # close 25% more, start trailing
+        stage1_pips: float = 10.0,   # close 25%, lock +N pips (not breakeven)
+        stage2_pips: float = 20.0,   # close 25% more, wider trailing
         stage3_pips: float = 30.0,   # close 25% more, tighten trail
         # Partial close percentages (must sum to < 1.0, remainder runs)
         stage1_close_pct: float = 0.25,
         stage2_close_pct: float = 0.25,
         stage3_close_pct: float = 0.25,
-        # Trailing stop settings
-        trail_distance_pips: float = 10.0,
+        # Stage 1 locked profit — prevents breakeven give-back after +10 pips
+        stage1_lock_pips: float = 3.0,
+        # Trailing stop settings — separate per stage
+        trail_stage1_pips: float = 5.0,   # 2026-04-17 tightened 10→5
+        trail_distance_pips: float = 10.0,  # used at stage 2
         trail_tight_pips: float = 7.0,   # tighter trail after stage 3
         min_trail_step_pips: float = 3.0,
     ):
@@ -57,7 +60,11 @@ class ProfitManager:
         self.stage2_pct = stage2_close_pct
         self.stage3_pct = stage3_close_pct
 
+        # Stage 1 profit lock
+        self.stage1_lock = stage1_lock_pips
+
         # Trail settings
+        self.trail_stage1 = trail_stage1_pips
         self.trail_distance = trail_distance_pips
         self.trail_tight = trail_tight_pips
         self.min_trail_step = min_trail_step_pips
@@ -169,8 +176,14 @@ class ProfitManager:
 
         initial_units = state["initial_units"]
 
-        # === STAGE 1: +10 pips → close 25%, SL to breakeven ===
+        # === STAGE 1: +10 pips → close 25%, lock +N pips (not breakeven) ===
+        # 2026-04-17: changed from breakeven → +3 pip lock. EUR_GBP gave back
+        # all gains after hitting +10 pips because SL at entry = too loose.
         if profit_pips >= self.stage1_pips and state["stage"] < 1:
+            lock_price = (
+                entry_price + (self.stage1_lock * pip_size) if is_buy
+                else entry_price - (self.stage1_lock * pip_size)
+            )
             close_units = int(initial_units * self.stage1_pct)
             if close_units >= 1 and abs_units > close_units:
                 if self._partial_close(trade_id, close_units, instrument, is_buy):
@@ -178,18 +191,17 @@ class ProfitManager:
                         f"PARTIAL 1/4: {instrument} trade {trade_id} — "
                         f"closed {close_units} units at +{profit_pips:.0f} pips"
                     )
-                # Move SL to breakeven regardless
-                self._update_sl(trade_id, entry_price, instrument)
+                self._update_sl(trade_id, lock_price, instrument)
                 logger.info(
-                    f"BREAKEVEN: {instrument} trade {trade_id} — "
-                    f"SL → {entry_price:.5f}"
+                    f"LOCK +{self.stage1_lock:.0f}: {instrument} trade {trade_id} — "
+                    f"SL → {lock_price:.5f}"
                 )
             elif close_units < 1:
-                # Position too small to split — just move SL to breakeven
-                self._update_sl(trade_id, entry_price, instrument)
+                # Position too small to split — just lock profit on the whole lot
+                self._update_sl(trade_id, lock_price, instrument)
                 logger.info(
-                    f"BREAKEVEN (no partial — units too small): {instrument} "
-                    f"trade {trade_id}"
+                    f"LOCK +{self.stage1_lock:.0f} (no partial — units too small): "
+                    f"{instrument} trade {trade_id}"
                 )
             state["stage"] = 1
 
@@ -219,8 +231,16 @@ class ProfitManager:
 
         # === TRAILING STOP (active after stage 1) ===
         if state["stage"] >= 1 and profit_pips >= self.stage1_pips:
-            # Use tighter trail after stage 3
-            trail = self.trail_tight if state["stage"] >= 3 else self.trail_distance
+            # Stage-specific trail distance:
+            #   Stage 1: 5 pips (tight — protect +3 pip lock)
+            #   Stage 2: 10 pips (wider — let trend breathe)
+            #   Stage 3+: 7 pips (tight final)
+            if state["stage"] >= 3:
+                trail = self.trail_tight
+            elif state["stage"] >= 2:
+                trail = self.trail_distance
+            else:
+                trail = self.trail_stage1
 
             if is_buy:
                 new_sl = market_price - (trail * pip_size)

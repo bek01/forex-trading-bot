@@ -39,7 +39,7 @@ class TrendFollowingStrategy(Strategy):
     slow_ema: int = 50
     trend_ema: int = 200  # for daily trend filter
     adx_period: int = 14
-    adx_min: float = 30.0  # only trade when ADX > this (strong trends only)
+    adx_min: float = 25.0  # lowered 2026-04-20 from 30 — most majors sit 15-25 in quiet regimes
     atr_period: int = 14
     sl_atr_multiplier: float = 1.5
     tp_atr_multiplier: float = 2.5  # tightened from 4.0 — trailing stop handles runners

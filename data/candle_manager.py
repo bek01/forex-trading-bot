@@ -10,6 +10,7 @@ Responsibilities:
 from __future__ import annotations
 
 import logging
+import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Optional
@@ -19,6 +20,12 @@ from event_bus import Event, bus
 from models import Candle
 
 logger = logging.getLogger(__name__)
+
+# Circuit breaker: after this many consecutive poll failures on one
+# instrument×timeframe, back off polling that endpoint for the cooldown
+# window. Prevents log spam and pointless API traffic during broker outages.
+_CB_TRIP_THRESHOLD = 3
+_CB_COOLDOWN_SEC = 60.0
 
 
 class CandleManager:
@@ -44,6 +51,10 @@ class CandleManager:
         self._last_timestamps: dict[str, dict[str, Optional[datetime]]] = defaultdict(
             lambda: defaultdict(lambda: None)
         )
+        # Per-endpoint circuit breaker: consecutive failure count and
+        # cooldown timestamp. Keyed by (instrument, timeframe).
+        self._fail_count: dict[tuple, int] = defaultdict(int)
+        self._cooldown_until: dict[tuple, float] = {}
         self._initialized = False
 
     def initialize(self):
@@ -83,12 +94,40 @@ class CandleManager:
         if not self._initialized:
             return
 
+        now = time.monotonic()
         for instrument in self.instruments:
             for timeframe in self.timeframes:
+                key = (instrument, timeframe)
+                # Skip if endpoint is in cooldown from prior failures
+                cd_until = self._cooldown_until.get(key)
+                if cd_until and now < cd_until:
+                    continue
                 try:
                     self._poll_one(instrument, timeframe)
+                    # Success — reset failure tracking
+                    if self._fail_count.get(key):
+                        logger.info(
+                            f"Candle poll recovered {instrument}/{timeframe} "
+                            f"after {self._fail_count[key]} failure(s)"
+                        )
+                    self._fail_count[key] = 0
+                    self._cooldown_until.pop(key, None)
                 except Exception as e:
-                    logger.error(f"Candle poll error {instrument}/{timeframe}: {e}")
+                    self._fail_count[key] += 1
+                    count = self._fail_count[key]
+                    if count >= _CB_TRIP_THRESHOLD:
+                        self._cooldown_until[key] = now + _CB_COOLDOWN_SEC
+                        logger.warning(
+                            f"Candle poll circuit-breaker TRIPPED "
+                            f"{instrument}/{timeframe}: {count} consecutive "
+                            f"failures, cooldown {int(_CB_COOLDOWN_SEC)}s. "
+                            f"Last error: {e}"
+                        )
+                    else:
+                        logger.error(
+                            f"Candle poll error {instrument}/{timeframe} "
+                            f"(fail #{count}): {e}"
+                        )
 
     def _poll_one(self, instrument: str, timeframe: str):
         """Poll one instrument/timeframe for new candles."""

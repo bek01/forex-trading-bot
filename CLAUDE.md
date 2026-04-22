@@ -52,8 +52,10 @@ Instruments (8): EUR_USD, GBP_USD, USD_JPY, AUD_USD, USD_CAD, NZD_USD, USD_CHF, 
 4. Wire into main.py event loop (currently scaffolding only)
 5. Enable behind `ENABLE_NEW_ARCH` flag, demo-only for 6 months
 
-## Gate Toggles (2026-04-21)
+## Gate Toggles (2026-04-21 → current)
 `DISABLE_TREND_FILTER=true` and `DISABLE_PAIR_GUARD=true` set on BOTH demo and live `.env` files. Risk manager (positions, drawdown, daily loss limit) still fully active. Current-arch strategies now reach executor without counter-trend / per-pair block gates — running unfiltered on demo+live while new arch is built.
+
+**2026-04-22 PM**: `RISK_MAX_SAME_CURRENCY_EXPOSURE=1` (was 2) on both accounts. Triggered by CHF-long concentration (EUR_CHF + GBP_CHF SELLs simultaneously) costing ~$1.3K on demo. Blocks the second correlated exposure to one side of a currency. Env parser note: .env comments MUST be on their own line — pydantic doesn't strip inline comments.
 
 ## Active Strategies (all enabled as of 2026-04-20)
 | Strategy | TF | Entry condition | Key filter |

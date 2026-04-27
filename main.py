@@ -669,7 +669,26 @@ class TradingBot:
             if not btid or btid in broker_open_ids:
                 continue
             trade = self.broker.get_trade(btid)
-            if not trade or trade.get("state", "OPEN") == "OPEN":
+            if trade is None:
+                # Could be 404 (orphan) or a transient error — disambiguate.
+                if self.broker.is_trade_orphan(btid) is True:
+                    bus.emit(Event.POSITION_CLOSED, {
+                        "broker_trade_id": btid,
+                        "instrument": row.get("instrument", ""),
+                        "side": row.get("side", ""),
+                        "strategy": row.get("strategy", ""),
+                        "exit_price": 0.0,
+                        "realized_pnl": 0.0,
+                        "close_reason": "broker_orphan",
+                        "closed_at": datetime.now(timezone.utc).isoformat(),
+                        "id": row.get("id"),
+                    })
+                    logger.warning(
+                        f"Reconciled orphan: {row.get('instrument')} trade={btid} "
+                        f"not found at broker (404), marked closed with pnl=0"
+                    )
+                continue
+            if trade.get("state", "OPEN") == "OPEN":
                 continue
 
             close_price = float(trade.get("averageClosePrice", 0) or 0)

@@ -360,6 +360,20 @@ class OandaBroker:
             logger.debug(f"get_open_trade_ids failed: {e}")
             return set()
 
+    def is_trade_orphan(self, trade_id: str) -> Optional[bool]:
+        """True if the broker returns 404 for this trade ID, False if it exists,
+        None on transient/unknown error. Used to distinguish orphans from network
+        flakes when reconciling stale DB rows."""
+        try:
+            resp = self.client.get(f"/v3/accounts/{self.account_id}/trades/{trade_id}")
+        except Exception:
+            return None
+        if resp.status_code == 404:
+            return True
+        if resp.status_code == 200:
+            return False
+        return None
+
     def close_all_positions(self) -> int:
         """Emergency: close ALL open positions. Returns count closed."""
         positions = self.get_open_positions()
